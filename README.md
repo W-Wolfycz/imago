@@ -4,7 +4,6 @@ Imago 是 AstrBot 的异步图片生成插件，支持普通绘图、Persona 出
 
 - 版本：`1.0.0`
 - AstrBot：`>=4.16,<5`
-- 完整架构、异步任务状态机、发送语义和 Review 清单：[ARCHITECTURE.md](ARCHITECTURE.md)
 
 ## 安装
 
