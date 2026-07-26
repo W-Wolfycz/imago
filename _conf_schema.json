@@ -1,0 +1,229 @@
+{
+  "providers": {
+    "description": "图片生成节点",
+    "type": "template_list",
+    "default": [],
+    "hint": "以 Plugin Page（WebUI）选择的主节点为准；未设置或无效时第一个有效节点为主节点，失败后按列表顺序尝试其他节点。",
+    "templates": {
+      "provider": {
+        "name": "图片生成节点",
+        "hint": "图片 Provider。主节点请在 Plugin Page（WebUI）设置；未设置或无效时默认第一个有效节点。",
+        "items": {
+        "id": {
+          "description": "节点 ID",
+          "type": "string",
+          "default": "primary",
+          "hint": "列表内唯一标识，仅用于日志和内部定位；不要填账号等敏感信息。"
+        },
+        "api_type": {
+          "description": "接口类型",
+          "type": "string",
+          "options": ["openai_image", "openai_chat", "gemini_official", "dashscope_multimodal", "custom_endpoint"],
+          "default": "openai_image",
+          "hint": "示例：openai_image=OpenAI images，openai_chat=chat/completions，gemini_official=Gemini，dashscope_multimodal=百炼，custom_endpoint=Imago JSON。"
+        },
+        "base_url": {
+          "description": "接口地址",
+          "type": "string",
+          "default": "",
+          "hint": "示例：OpenAI `https://api.example.com/v1`；Gemini `https://generativelanguage.googleapis.com/v1beta`；百炼/custom 填可直接 POST 的完整 URL。"
+        },
+        "api_keys": {
+          "description": "API Keys（每行一个）",
+          "type": "list",
+          "default": [],
+          "hint": "多行填写多个 Key，每行一个；每次请求轮换使用。"
+        },
+        "model": {
+          "description": "默认模型",
+          "type": "string",
+          "default": "",
+          "hint": "默认图片模型 ID，必须与接口协议匹配。"
+        },
+        "reference_image_limit": {
+          "description": "参考图总上限",
+          "type": "int",
+          "default": 0,
+          "hint": "消息附图优先，剩余名额再抽 Persona 图。例：上限 3 且带 1 张用户图时，最多取 2 张 Persona 图；0=不限制，主/备模型共用。"
+        },
+        "available_models": {
+          "description": "备选模型列表",
+          "type": "list",
+          "default": [],
+          "hint": "默认模型失败后按顺序尝试；所有模型须共用本节点的协议和 Base URL。"
+        },
+        "default_size": {
+          "description": "默认图片尺寸",
+          "type": "string",
+          "default": "1024x1024",
+          "hint": "未指定尺寸时使用，如 1024x1024；须为模型支持值，百炼会自动转为 *。"
+        },
+        "timeout": {
+          "description": "单次节点超时（秒）",
+          "type": "int",
+          "default": 180,
+          "hint": "单次 Provider 请求超时，最小 10 秒；同时受任务总超时限制。"
+        }
+        }
+      }
+    }
+  },
+  "optimizer_config": {
+    "description": "Persona 副脑与识图",
+    "type": "object",
+    "hint": "整理 Persona 动态画面并按需识图；普通绘图不经过副脑。",
+    "items": {
+      "enable_optimizer": {
+        "description": "整理 Persona 动态画面",
+        "type": "bool",
+        "default": true,
+        "hint": "只整理 Persona 本轮动作、场景、服饰、视角和构图；关闭后直接拼接描述与摘要。"
+      },
+      "optimizer_provider_id": {
+        "description": "副脑 Chat Provider",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "留空则跟随任务会话当前的 Chat Provider。"
+      },
+      "vision_provider_id": {
+        "description": "Persona 识图 Provider",
+        "type": "string",
+        "default": "",
+        "_special": "select_provider",
+        "hint": "选择支持图片输入的 Provider；留空则只用 Persona Prompt 生成摘要。"
+      },
+      "optimizer_prompt": {
+        "description": "Persona 动态画面提示词",
+        "type": "text",
+        "default": "将本轮画面需求整理为准确、具体、可直接交给图片模型的提示词。保留用户明确指定的主体、数量、画面文字、动作、场景、服饰、视角、构图和风格，不得补写会改变用户意图的关键设定。",
+        "hint": "约束 Persona 动态画面整理；风格、稳定外观和输出格式由插件追加。"
+      },
+      "optimizer_style": {
+        "description": "默认风格预设",
+        "type": "string",
+        "options": ["default", "realistic", "cinematic", "anime", "3d"],
+        "default": "default",
+        "hint": "选择默认风格；用户当轮明确指定的风格优先。"
+      }
+    }
+  },
+  "quota_config": {
+    "description": "绘图额度与访问控制",
+    "type": "object",
+    "hint": "限制普通用户通过指令或 LLM 工具创建图片任务；黑名单优先。",
+    "items": {
+      "enable_quota": {
+        "description": "启用绘图额度",
+        "type": "bool",
+        "default": false,
+        "hint": "关闭时普通用户不扣额度，但黑名单仍生效。"
+      },
+      "blacklist_ids": {
+        "description": "绘图黑名单",
+        "type": "list",
+        "default": [],
+        "hint": "每行一个用户 ID；禁止指令绘图，也不注入两个绘图工具。"
+      },
+      "unlimited_whitelist_ids": {
+        "description": "无限额度白名单",
+        "type": "list",
+        "default": [],
+        "hint": "每行一个用户 ID；不扣额度且无日上限，黑名单优先。"
+      },
+      "enable_daily_refresh": {
+        "description": "启用每日额度刷新",
+        "type": "bool",
+        "default": true,
+        "hint": "当天首次访问额度时重置到目标值，低补高削。"
+      },
+      "daily_quota_target": {
+        "description": "每日刷新目标额度",
+        "type": "int",
+        "default": 0,
+        "hint": "每日刷新目标；余额精确重置到此值，最小按 0 处理。"
+      },
+      "enable_checkin": {
+        "description": "启用签到额度",
+        "type": "bool",
+        "default": false,
+        "hint": "启用后可用 /imago quota sign 每日领取一次随机额度。"
+      },
+      "daily_checkin_quota_min": {
+        "description": "每日签到额度下限",
+        "type": "int",
+        "default": 1,
+        "hint": "单次签到最少增加的额度。"
+      },
+      "daily_checkin_quota_max": {
+        "description": "每日签到额度上限",
+        "type": "int",
+        "default": 3,
+        "hint": "单次签到最多增加的额度，低于下限时按下限处理。"
+      }
+    }
+  },
+  "task_config": {
+    "description": "后台任务",
+    "type": "object",
+    "hint": "控制任务总超时和并发数；重载后不恢复任务。",
+    "items": {
+      "generation_timeout": {
+        "description": "单个任务总超时（秒）",
+        "type": "int",
+        "default": 300,
+        "hint": "从创建到发送前的总超时，包含排队、处理和 Provider 请求，最小 30 秒。"
+      },
+      "max_concurrent_tasks": {
+        "description": "最大并发任务数",
+        "type": "int",
+        "default": 2,
+        "hint": "同时运行的完整任务数，最小 1；修改后动态生效，降低时不取消已运行任务。"
+      }
+    }
+  },
+  "storage_config": {
+    "description": "图片存储与网络安全",
+    "type": "object",
+    "hint": "控制参考图、临时缓存和远程图片下载；数据写入 AstrBot 的 imago 数据目录。",
+    "items": {
+      "max_upload_mb": {
+        "description": "单张参考图上限（MB）",
+        "type": "int",
+        "default": 20,
+        "hint": "适用于上传、消息参考图和远程下载；最小按 1 MB 处理。"
+      },
+      "temp_cache_mb": {
+        "description": "临时图片缓存上限（MB）",
+        "type": "int",
+        "default": 512,
+        "hint": "仅限制插件产生的临时图片，不含 Persona 固定图；最小 16 MB。"
+      },
+      "block_private_networks": {
+        "description": "阻止私网图片 URL",
+        "type": "bool",
+        "default": true,
+        "hint": "拒绝 localhost、回环、局域网等非公网地址；仅在确需内网图片时关闭。"
+      }
+    }
+  },
+  "log_config": {
+    "description": "日志配置",
+    "type": "object",
+    "hint": "调整 Imago 诊断日志；不会记录密钥、完整图片数据或 Persona Prompt。",
+    "items": {
+      "debug_to_info": {
+        "description": "调试日志提级",
+        "type": "bool",
+        "default": false,
+        "hint": "将插件 debug 提升为 info，便于排障。"
+      },
+      "log_with_bot_id": {
+        "description": "日志区分机器人实例",
+        "type": "bool",
+        "default": false,
+        "hint": "在有消息上下文的日志前加 Bot 实例 ID，便于多 Bot 排查。"
+      }
+    }
+  }
+}

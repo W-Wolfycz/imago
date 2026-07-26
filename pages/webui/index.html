@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>映相管理台</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="aurora aurora-a"></div><div class="aurora aurora-b"></div>
+  <main class="shell">
+    <header>
+      <div><p class="eyebrow">IMAGO · 映相</p><h1>素材、节点与额度管理</h1></div>
+      <div class="top-actions"><p id="notice" role="status"></p><button id="save-config" disabled>保存配置</button></div>
+    </header>
+    <nav class="tabs" aria-label="管理分类">
+      <button class="tab active" data-tab="personas">人设审阅</button>
+      <button class="tab" data-tab="providers">节点管理</button>
+      <button class="tab" data-tab="quotas">额度管理</button>
+    </nav>
+
+    <section id="tab-personas" class="panel active">
+      <aside class="persona-list">
+        <label>搜索 Persona<input id="persona-search" type="search" placeholder="输入 Persona ID"></label>
+        <select id="persona-select" size="14" aria-label="Persona 列表"></select>
+      </aside>
+      <div class="persona-detail">
+        <div class="section-head"><div><p class="eyebrow">当前 Persona</p><h2 id="persona-title">请选择</h2></div></div>
+        <article class="card"><h3>完整 Persona Prompt</h3><pre id="persona-prompt">尚未选择 Persona</pre></article>
+        <article class="card"><h3>Persona 摘要模型</h3><div class="brain-selectors"><label>文本副脑<select id="optimizer-provider"></select></label><label>Persona 识图模型<select id="vision-provider"></select></label></div></article>
+        <article class="card summary-card"><div class="card-title"><div><h3>外观摘要</h3><p>LLM 自动摘要会被约束为简短外观描述；手工覆写不限字数，由你自行审阅和编辑。</p></div><span id="summary-mode" class="pill"></span></div><textarea id="persona-summary" rows="5" placeholder="尚无摘要"></textarea><div class="actions"><span id="summary-count">0 字符</span><div class="summary-buttons"><button id="rebuild" disabled>重建外观摘要</button><button id="save-summary" disabled>保存手工覆写</button></div></div></article>
+        <article class="card">
+          <div class="reference-heading"><h3>Persona 参考图</h3><p>支持 PNG、JPEG、WebP 和 GIF，可一次选择多张。</p></div>
+          <div class="upload"><input id="reference-files" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple><button id="upload" disabled>上传所选图片</button></div>
+          <p class="reference-note">勾选的图片仅在手动点击“重建外观摘要”时交给识图模型；未勾选的图片仍可作为 T2I 参考图。</p><div id="gallery" class="gallery"><p class="empty">尚无参考图</p></div>
+        </article>
+      </div>
+    </section>
+
+    <section id="tab-providers" class="panel">
+      <div class="provider-management"><div class="provider-intro"><div><p class="eyebrow">节点管理</p><h2>调用顺序</h2><p>点击节点左侧图标设置主节点（⭐）；未设置或无效时第一个有效节点为主节点，其余节点按列表顺序调用。</p></div><button id="add-provider" type="button">新建节点</button></div><div id="provider-list" class="provider-list"><p class="empty">正在读取节点……</p></div></div>
+    </section>
+
+    <section id="tab-quotas" class="panel">
+      <div class="quota-management">
+        <div class="quota-intro">
+          <div><p class="eyebrow">额度管理</p><h2>ID 对应额度</h2><p>黑名单和无限白名单在插件配置中维护；此处修改持久余额。</p></div>
+          <button id="add-quota-row" type="button">新增 ID</button>
+        </div>
+        <div id="quota-policy" class="quota-policy"></div>
+        <div class="quota-table" role="table" aria-label="绘图额度">
+          <div class="quota-row quota-head" role="row"><span>用户 ID</span><span>状态</span><span>额度</span><span>刷新日期</span><span>签到日期</span></div>
+          <div id="quota-list"><p class="empty">正在读取额度……</p></div>
+        </div>
+        <div class="quota-footer"><span id="quota-count">0 条记录</span><button id="save-quotas" type="button" disabled>保存额度</button></div>
+      </div>
+    </section>
+  </main>
+  <script src="app.js"></script>
+</body>
+</html>
