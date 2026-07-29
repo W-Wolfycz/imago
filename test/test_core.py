@@ -83,6 +83,16 @@ class SourceContractTests(unittest.TestCase):
         self.assertIn("function sortedQuotaEntries()", app)
         self.assertIn("quotaSort:{key:'user_id',direction:'asc'}", app)
 
+    def test_help_menu_contract(self):
+        source = (ROOT / "main.py").read_text("utf-8")
+        self.assertIn("🖼️ IMAGO·映相 指令帮助", source)
+        for section in ("[开始绘图]", "[任务与额度]", "[Persona 素材]", "[图片节点]", "[Bot 管理员]", "[示例]"):
+            self.assertIn(section, source)
+        self.assertIn("if event.is_admin():", source)
+        self.assertIn("await self.text_to_image(md_text, return_url=False)", source)
+        self.assertIn("yield event.image_result(image_path)", source)
+        self.assertIn("回退纯文本", source)
+
 
 class ConfigTests(unittest.TestCase):
     def test_defaults_and_bounds(self):

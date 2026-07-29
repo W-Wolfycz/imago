@@ -879,7 +879,55 @@ class Imago(Star):
 
     @imago_group.command("help")
     async def help_command(self, event: AstrMessageEvent):
-        yield event.plain_result("imago draw/photo/status/quota/ref-upload/summary-show/summary-rebuild/summary-set/provider-primary")
+        lines = [
+            "🖼️ IMAGO·映相 指令帮助",
+            "",
+            "[开始绘图]",
+            "- /imago draw <画面描述>  普通绘图或参考图改图",
+            "- /画 <画面描述>  普通绘图快捷入口",
+            "- /imago photo <画面要求>  让当前人设出镜",
+            "- /拍照 <画面要求>  人设出镜快捷入口",
+            "",
+            "[任务与额度]",
+            "- /imago status  查看正在处理或刚结束的任务",
+            "- /imago quota show  查看自己的绘图额度",
+            "- /imago quota sign  每日签到领取额度",
+            "",
+            "[Persona 素材]",
+            "- /imago ref-upload  为当前人设上传参考图（同条消息附图）",
+            "- /imago summary-show  查看当前人设外观摘要",
+            "- /imago summary-rebuild  重新生成外观摘要",
+            "- /imago summary-set <外观摘要>  手工设置外观摘要",
+            "",
+            "[图片节点]",
+            "- /imago provider-primary <节点 ID>  设置主节点（也可在 WebUI 设置）",
+        ]
+        if event.is_admin():
+            lines.extend([
+                "",
+                "[Bot 管理员]",
+                "- /imago quota add <用户 ID> <整数>  增加额度",
+                "- /imago quota del <用户 ID> <整数>  扣除额度",
+                "- /imago quota set <用户 ID> <整数>  设置额度",
+            ])
+        lines.extend([
+            "",
+            "[示例]",
+            "- /画 雨夜街头的橘猫，电影感，横幅构图",
+            "- /拍照 在海边回头看向镜头，黄昏逆光",
+        ])
+
+        md_text = "\n".join(lines)
+        try:
+            image_path = await self.text_to_image(md_text, return_url=False)
+            yield event.image_result(image_path)
+        except Exception as exc:
+            logger.warning(
+                "%s 帮助菜单 T2I 失败，回退纯文本 type=%s",
+                self._log_prefix(event),
+                type(exc).__name__,
+            )
+            yield event.plain_result(md_text)
 
     @imago_group.command("status")
     async def status_command(self, event: AstrMessageEvent):
