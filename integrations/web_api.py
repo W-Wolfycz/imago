@@ -104,7 +104,7 @@ class PageAPI:
             summary = await self.plugin.rebuild_summary(persona_id, reference_names)
             return _ok("已重建", summary=summary)
         except Exception:
-            return _err("无法重建外观摘要；请确认 Persona prompt 和副脑 Chat Provider 已配置", 500)
+            return _err("无法重建外观摘要；请确认 Persona Prompt 和副脑 Provider 已配置", 500)
 
     async def set_summary(self):
         try:

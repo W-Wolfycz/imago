@@ -6,7 +6,15 @@ from typing import Any
 from .models import ProviderConfig, QuotaConfig, RuntimeConfig
 
 API_TYPES = {"openai_image", "openai_chat", "gemini_official", "dashscope_multimodal", "custom_endpoint"}
-STYLES = {"default", "realistic", "cinematic", "anime", "3d"}
+STYLES = {"none", "default", "realistic", "cinematic", "anime", "3d"}
+STYLE_OPTIONS = {
+    "None(无)": "none",
+    "default(通用)": "default",
+    "realistic(写实)": "realistic",
+    "cinematic(电影感)": "cinematic",
+    "anime(动漫)": "anime",
+    "3d(3D渲染)": "3d",
+}
 
 
 def _line_items(value: Any) -> tuple[str, ...]:
@@ -20,6 +28,13 @@ def _keys(value: Any) -> tuple[str, ...]:
 
 def _ids(value: Any) -> frozenset[str]:
     return frozenset(_line_items(value))
+
+
+def _style(value: Any) -> str:
+    text = str(value).strip()
+    if text in STYLES:
+        return text
+    return STYLE_OPTIONS.get(text, "default")
 
 
 def load_config(raw: Mapping[str, Any]) -> RuntimeConfig:
@@ -51,7 +66,7 @@ def load_config(raw: Mapping[str, Any]) -> RuntimeConfig:
     tasks = raw.get("task_config", {}) or {}
     storage = raw.get("storage_config", {}) or {}
     logs = raw.get("log_config", {}) or {}
-    style = str(optimizer.get("optimizer_style", "default"))
+    style = _style(optimizer.get("optimizer_style", "default(通用)"))
     checkin_min = max(0, int(quota_raw.get("daily_checkin_quota_min", 1) or 0))
     checkin_max = max(checkin_min, int(quota_raw.get("daily_checkin_quota_max", 3) or 0))
     return RuntimeConfig(
@@ -70,7 +85,7 @@ def load_config(raw: Mapping[str, Any]) -> RuntimeConfig:
         optimizer_provider_id=str(optimizer.get("optimizer_provider_id", "")).strip(),
         vision_provider_id=str(optimizer.get("vision_provider_id", "")).strip(),
         optimizer_prompt=str(optimizer.get("optimizer_prompt", "")).strip(),
-        optimizer_style=style if style in STYLES else "default",
+        optimizer_style=style,
         generation_timeout=max(30, int(tasks.get("generation_timeout", 300))),
         max_concurrent_tasks=max(1, int(tasks.get("max_concurrent_tasks", 2))),
         max_upload_bytes=max(1, int(storage.get("max_upload_mb", 20) or 20)) * 1024 * 1024,

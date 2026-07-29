@@ -32,7 +32,7 @@
           "description": "API Keys（每行一个）",
           "type": "list",
           "default": [],
-          "hint": "多行填写多个 Key，每行一个；每次请求轮换使用。"
+          "hint": "多行填写多个 Key，每行一个；每个节点内按调用顺序轮换，不随机挑选。"
         },
         "model": {
           "description": "默认模型",
@@ -71,16 +71,16 @@
   "optimizer_config": {
     "description": "Persona 副脑与识图",
     "type": "object",
-    "hint": "整理 Persona 动态画面并按需识图；普通绘图不经过副脑。",
+    "hint": "使用副脑优化 Persona 动态画面并按需识图；普通绘图不经过副脑。",
     "items": {
       "enable_optimizer": {
-        "description": "整理 Persona 动态画面",
+        "description": "启用副脑优化",
         "type": "bool",
         "default": true,
-        "hint": "只整理 Persona 本轮动作、场景、服饰、视角和构图；关闭后直接拼接描述与摘要。"
+        "hint": "使用副脑整理 Persona 本轮动作、场景、服饰、视角和构图，同时将所选风格预设写入副脑提示词；关闭后直接拼接描述与摘要。"
       },
       "optimizer_provider_id": {
-        "description": "副脑 Chat Provider",
+        "description": "副脑 Provider",
         "type": "string",
         "default": "",
         "_special": "select_provider",
@@ -91,20 +91,20 @@
         "type": "string",
         "default": "",
         "_special": "select_provider",
-        "hint": "选择支持图片输入的 Provider；留空则只用 Persona Prompt 生成摘要。"
+        "hint": "仅在 Plugin Page 勾选参考图并手动重建摘要时调用；必须选择支持图片输入的 Provider。留空则只按 Persona Prompt 摘要。"
       },
       "optimizer_prompt": {
-        "description": "Persona 动态画面提示词",
+        "description": "副脑自定义提示词",
         "type": "text",
         "default": "将本轮画面需求整理为准确、具体、可直接交给图片模型的提示词。保留用户明确指定的主体、数量、画面文字、动作、场景、服饰、视角、构图和风格，不得补写会改变用户意图的关键设定。",
-        "hint": "约束 Persona 动态画面整理；风格、稳定外观和输出格式由插件追加。"
+        "hint": "启用副脑后始终生效，用于规定如何整理本轮画面；风格预设按选择追加，稳定外观约束和输出格式由插件固定追加。"
       },
       "optimizer_style": {
-        "description": "默认风格预设",
+        "description": "副脑风格预设",
         "type": "string",
-        "options": ["default", "realistic", "cinematic", "anime", "3d"],
-        "default": "default",
-        "hint": "选择默认风格；用户当轮明确指定的风格优先。"
+        "options": ["None(无)", "default(通用)", "realistic(写实)", "cinematic(电影感)", "anime(动漫)", "3d(3D渲染)"],
+        "default": "default(通用)",
+        "hint": "追加到副脑自定义提示词；None(无) 不追加内置风格。用户当轮明确指定的风格优先。"
       }
     }
   },

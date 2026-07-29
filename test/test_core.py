@@ -56,12 +56,57 @@ class SourceContractTests(unittest.TestCase):
         for command in ("add", "del", "set", "show", "sign"):
             self.assertIn(f'@quota_group.command("{command}")', source)
 
+    def test_ui_labels_key_rotation_and_quota_sort_contract(self):
+        schema = json.loads((ROOT / "_conf_schema.json").read_text("utf-8"))
+        optimizer = schema["optimizer_config"]["items"]
+        provider = schema["providers"]["templates"]["provider"]["items"]
+        self.assertEqual(optimizer["enable_optimizer"]["description"], "启用副脑优化")
+        self.assertIn("所选风格预设", optimizer["enable_optimizer"]["hint"])
+        self.assertEqual(optimizer["optimizer_provider_id"]["description"], "副脑 Provider")
+        self.assertEqual(optimizer["optimizer_prompt"]["description"], "副脑自定义提示词")
+        self.assertIn("始终生效", optimizer["optimizer_prompt"]["hint"])
+        self.assertEqual(
+            optimizer["optimizer_style"]["options"],
+            ["None(无)", "default(通用)", "realistic(写实)", "cinematic(电影感)", "anime(动漫)", "3d(3D渲染)"],
+        )
+        self.assertEqual(optimizer["optimizer_style"]["default"], "default(通用)")
+        self.assertIn("None(无)", optimizer["optimizer_style"]["hint"])
+        self.assertIn("Plugin Page", optimizer["vision_provider_id"]["hint"])
+        self.assertIn("不随机挑选", provider["api_keys"]["hint"])
+
+        metadata = (ROOT / "metadata.yaml").read_text("utf-8")
+        html = (ROOT / "pages" / "webui" / "index.html").read_text("utf-8")
+        app = (ROOT / "pages" / "webui" / "app.js").read_text("utf-8")
+        self.assertIn("display_name: IMAGO·映相", metadata)
+        for key in ("user_id", "status", "quota", "last_refresh_date", "last_checkin_date"):
+            self.assertIn(f'data-quota-sort="{key}"', html)
+        self.assertIn("function sortedQuotaEntries()", app)
+        self.assertIn("quotaSort:{key:'user_id',direction:'asc'}", app)
+
 
 class ConfigTests(unittest.TestCase):
     def test_defaults_and_bounds(self):
         cfg = load_config({"task_config": {"generation_timeout": 1, "max_concurrent_tasks": 0}})
         self.assertEqual(cfg.generation_timeout, 30)
         self.assertEqual(cfg.max_concurrent_tasks, 1)
+
+    def test_optimizer_style_labels_are_normalized(self):
+        expected = {
+            "None(无)": "none",
+            "default(通用)": "default",
+            "realistic(写实)": "realistic",
+            "cinematic(电影感)": "cinematic",
+            "anime(动漫)": "anime",
+            "3d(3D渲染)": "3d",
+            "realistic": "realistic",
+        }
+        for configured, internal in expected.items():
+            with self.subTest(configured=configured):
+                cfg = load_config({"optimizer_config": {"optimizer_style": configured}})
+                self.assertEqual(cfg.optimizer_style, internal)
+
+        invalid = load_config({"optimizer_config": {"optimizer_style": "unknown"}})
+        self.assertEqual(invalid.optimizer_style, "default")
 
     def test_invalid_and_duplicate_providers_are_removed(self):
         raw = {"providers": [
@@ -432,6 +477,14 @@ class PromptingTests(unittest.TestCase):
         self.assertIn(DEFAULT_OPTIMIZER_SYSTEM, prompt)
         self.assertIn("始终优先", prompt)
         self.assertIn("不得复制", prompt)
+        self.assertIn("风格预设：", prompt)
+
+    def test_optimizer_none_uses_custom_prompt_without_builtin_style(self):
+        prompt = optimizer_system("CUSTOM SCENE RULE", "none", persona=True)
+        self.assertIn("CUSTOM SCENE RULE", prompt)
+        self.assertNotIn("风格预设：", prompt)
+        self.assertIn("始终优先于副脑自定义提示词", prompt)
+        self.assertIn("<identity_summary>", prompt)
 
     def test_model_inputs_are_delimited(self):
         self.assertEqual(

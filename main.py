@@ -43,10 +43,10 @@ from .services.quota_store import QuotaStore, terminal_refund_amount
 from .services.scheduler import TaskScheduler
 
 PENDING_DRAW = "🎨 收到灵感，正在绘制，请稍后…… ✨"
-PENDING_PHOTO = "📸 正在为当前人设「{persona}」拍摄，请稍后……拍好后会直接发过来。"
+PENDING_PHOTO = "📸 正在为当前人设「{persona}」拍摄，请稍后……"
 
 
-@register("imago", "Wolfycz", "异步图片生成与 Persona 素材管理", "1.0.0")
+@register("imago", "Wolfycz", "异步图片生成与 Persona 素材管理", "1.0.1")
 class Imago(Star):
     _STAGE_LABELS = {
         TaskStage.QUEUED: "排队中",
@@ -995,7 +995,7 @@ class Imago(Star):
         """
         try:
             await self._submit(event, action, persona=True, count=count, aspect_ratio=aspect_ratio, size=size, extra_params=extra_params)
-            return "后台 Persona 图片任务已创建，但图片目前尚未生成或确认送达；插件会在处理完成后另行发送。不要承诺准确完成时间。请以当前 Persona 的语气简短回复用户，自然表达“正在拍摄，拍好后会直接发过来”；不要声称已经拍好或正在冲洗。"
+            return "后台 Persona 图片任务已创建，但图片目前尚未生成或确认送达；插件会在处理完成后另行发送。不要承诺准确完成时间。请以当前 Persona 的语气简短回复用户，自然表达“正在拍摄，请稍后……”；不要声称已经拍好。"
         except Exception as exc:
             return f"后台 Persona 图片任务未能创建。可告知用户的原因：{self._safe_creation_error(exc)}。请以当前 Persona 的语气简短说明失败，不要虚构任务已开始、正在拍摄或图片已经生成。"
 

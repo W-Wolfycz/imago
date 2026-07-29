@@ -41,6 +41,41 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             if old is None: scheduler_module.ADAPTERS.pop("custom_endpoint", None)
             else: scheduler_module.ADAPTERS["custom_endpoint"] = old
 
+    async def test_api_key_rotation_is_independent_per_provider(self):
+        captured = []
+
+        class Adapter:
+            def __init__(self, config): self.config = config
+            async def generate(self, session, request, key):
+                captured.append((self.config.id, key))
+                return [ImageResult(data=b"image")]
+
+        old = scheduler_module.ADAPTERS.get("custom_endpoint")
+        scheduler_module.ADAPTERS["custom_endpoint"] = Adapter
+        providers = (
+            ProviderConfig("node_a", "custom_endpoint", "https://example.invalid/a", ("a1", "a2"), model="model"),
+            ProviderConfig("node_b", "custom_endpoint", "https://example.invalid/b", ("b1", "b2"), model="model"),
+        )
+        scheduler = TaskScheduler(
+            lambda: RuntimeConfig(providers=providers, generation_timeout=30),
+            DummySession(), lambda *_: True, lambda *_: None,
+        )
+        try:
+            for provider_id in ("node_a", "node_b", "node_a", "node_b"):
+                task = DrawTask(provider_id, "umo", GenerationRequest("x"))
+                task.runtime["primary_provider_id"] = provider_id
+                await scheduler._generate(task)
+            self.assertEqual(captured, [
+                ("node_a", "a1"),
+                ("node_b", "b1"),
+                ("node_a", "a2"),
+                ("node_b", "b2"),
+            ])
+        finally:
+            await scheduler.close()
+            if old is None: scheduler_module.ADAPTERS.pop("custom_endpoint", None)
+            else: scheduler_module.ADAPTERS["custom_endpoint"] = old
+
     async def test_selected_primary_provider_is_tried_first_and_invalid_falls_back_to_first(self):
         attempts = []
 

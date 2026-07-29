@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import itertools
 import random
 import time
 import uuid
@@ -73,7 +72,7 @@ class TaskScheduler:
         self._limiter = _DynamicLimiter(
             lambda: self.config_getter().max_concurrent_tasks,
         )
-        self._key_index = itertools.count()
+        self._key_indices: dict[str, int] = {}
 
     def submit(self, task: DrawTask) -> str:
         if not self.accepting: raise RuntimeError("插件正在关闭")
@@ -268,7 +267,9 @@ class TaskScheduler:
                 task.runtime["current_model"] = model
                 self.set_stage(task, TaskStage.REQUESTING_PROVIDER)
                 adapter = ADAPTERS[attempt.api_type](attempt)
-                key = attempt.api_keys[next(self._key_index) % len(attempt.api_keys)]
+                key_index = self._key_indices.get(attempt.id, 0)
+                key = attempt.api_keys[key_index % len(attempt.api_keys)]
+                self._key_indices[attempt.id] = key_index + 1
                 try:
                     self.debug(
                         task,
