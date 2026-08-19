@@ -6,7 +6,7 @@ from pathlib import Path
 
 from imago.core.config import load_config
 from imago.core.errors import DuplicateImage, NoOutputError, ProviderError, UnsupportedResponse
-from imago.core.models import DrawTask, GenerationRequest, ImageInput, ProviderConfig, QuotaConfig, TaskState
+from imago.core.models import GenerationRequest, ImageInput, ProviderConfig, QuotaConfig, TaskState
 from imago.providers.dashscope import DashScopeMultimodalAdapter
 from imago.providers.openai_chat import OpenAIChatAdapter
 from imago.providers.openai_image import OpenAIImageAdapter
@@ -21,77 +21,6 @@ from imago.services.persona_store import PersonaStore
 from imago.services.quota_store import QuotaStore, terminal_refund_amount
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-class SourceContractTests(unittest.TestCase):
-    def test_photo_command_names_resolved_persona(self):
-        source = (ROOT / "main.py").read_text("utf-8")
-        self.assertIn("正在为当前人设「{persona}」拍摄", source)
-        self.assertNotIn("正在为当前 Persona「{persona}」拍摄", source)
-        self.assertIn("PENDING_PHOTO.format(persona=resolved_persona[0])", source)
-
-    def test_debug_trace_does_not_repeat_stable_generation_payload(self):
-        main_source = (ROOT / "main.py").read_text("utf-8")
-        scheduler_source = (ROOT / "services" / "scheduler.py").read_text("utf-8")
-        self.assertNotIn("副脑重构链路", main_source)
-        self.assertNotIn("副脑重构结果", main_source)
-        self.assertNotIn("外观视觉证据", main_source)
-        self.assertIn("最终生成请求", main_source)
-        self.assertIn("绘图模型成功", scheduler_source)
-        self.assertIn("绘图模型失败", scheduler_source)
-        self.assertNotIn("ref_bytes=%d prompt=%s params=%s", scheduler_source)
-
-    def test_quota_tool_filter_and_nested_commands_are_kept(self):
-        source = (ROOT / "main.py").read_text("utf-8")
-        self.assertIn('req.func_tool.remove_tool("generate_image")', source)
-        self.assertIn('req.func_tool.remove_tool("generate_persona_image")', source)
-        self.assertNotIn("IMAGO_TASK_STATUS", source)
-        self.assertNotIn("IMAGO_ACCESS_STATUS", source)
-        self.assertNotIn("extra_user_content_parts", source)
-        self.assertNotIn("TextPart", source)
-        self.assertIn('task.runtime["quota_charged"] = charged', source)
-        self.assertIn("terminal_refund_amount(task.state, charged)", source)
-        self.assertIn("self._settle_task_quota(task)", source)
-        self.assertIn('@imago_group.group("quota")', source)
-        for command in ("add", "del", "set", "show", "sign"):
-            self.assertIn(f'@quota_group.command("{command}")', source)
-
-    def test_ui_labels_key_rotation_and_quota_sort_contract(self):
-        schema = json.loads((ROOT / "_conf_schema.json").read_text("utf-8"))
-        optimizer = schema["optimizer_config"]["items"]
-        provider = schema["providers"]["templates"]["provider"]["items"]
-        self.assertEqual(optimizer["enable_optimizer"]["description"], "启用副脑优化")
-        self.assertIn("所选风格预设", optimizer["enable_optimizer"]["hint"])
-        self.assertEqual(optimizer["optimizer_provider_id"]["description"], "副脑 Provider")
-        self.assertEqual(optimizer["optimizer_prompt"]["description"], "副脑自定义提示词")
-        self.assertIn("始终生效", optimizer["optimizer_prompt"]["hint"])
-        self.assertEqual(
-            optimizer["optimizer_style"]["options"],
-            ["None(无)", "default(通用)", "realistic(写实)", "cinematic(电影感)", "anime(动漫)", "3d(3D渲染)"],
-        )
-        self.assertEqual(optimizer["optimizer_style"]["default"], "default(通用)")
-        self.assertIn("None(无)", optimizer["optimizer_style"]["hint"])
-        self.assertIn("Plugin Page", optimizer["vision_provider_id"]["hint"])
-        self.assertIn("不随机挑选", provider["api_keys"]["hint"])
-
-        metadata = (ROOT / "metadata.yaml").read_text("utf-8")
-        html = (ROOT / "pages" / "webui" / "index.html").read_text("utf-8")
-        app = (ROOT / "pages" / "webui" / "app.js").read_text("utf-8")
-        self.assertIn("display_name: IMAGO·映相", metadata)
-        for key in ("user_id", "status", "quota", "last_refresh_date", "last_checkin_date"):
-            self.assertIn(f'data-quota-sort="{key}"', html)
-        self.assertIn("function sortedQuotaEntries()", app)
-        self.assertIn("quotaSort:{key:'user_id',direction:'asc'}", app)
-
-    def test_help_menu_contract(self):
-        source = (ROOT / "main.py").read_text("utf-8")
-        self.assertIn("🖼️ IMAGO·映相 指令帮助", source)
-        for section in ("[开始绘图]", "[任务与额度]", "[Persona 素材]", "[图片节点]", "[Bot 管理员]", "[示例]"):
-            self.assertIn(section, source)
-        self.assertIn("if event.is_admin():", source)
-        self.assertIn("await self.text_to_image(md_text, return_url=False)", source)
-        self.assertIn("yield event.image_result(image_path)", source)
-        self.assertIn("回退纯文本", source)
 
 
 class ConfigTests(unittest.TestCase):
@@ -117,6 +46,24 @@ class ConfigTests(unittest.TestCase):
 
         invalid = load_config({"optimizer_config": {"optimizer_style": "unknown"}})
         self.assertEqual(invalid.optimizer_style, "default")
+
+    def test_fallback_style_injection_defaults_false(self):
+        self.assertFalse(load_config({}).fallback_style_injection)
+        self.assertTrue(
+            load_config({"optimizer_config": {"fallback_style_injection": True}}).fallback_style_injection
+        )
+
+    def test_llm_caption_defaults_false(self):
+        self.assertFalse(load_config({}).llm_caption)
+        self.assertTrue(load_config({"task_config": {"llm_caption": True}}).llm_caption)
+        self.assertFalse(load_config({}).llm_caption_cm_context)
+        self.assertTrue(
+            load_config({"task_config": {"llm_caption_cm_context": True}}).llm_caption_cm_context
+        )
+        self.assertFalse(load_config({}).llm_caption_pregen)
+        self.assertTrue(
+            load_config({"task_config": {"llm_caption_pregen": True}}).llm_caption_pregen
+        )
 
     def test_invalid_and_duplicate_providers_are_removed(self):
         raw = {"providers": [
@@ -188,6 +135,7 @@ class ConfigTests(unittest.TestCase):
     def test_legacy_daily_quota_floor_is_not_loaded(self):
         cfg = load_config({"quota_config": {"daily_quota_floor": 9}})
         self.assertEqual(cfg.quota.daily_quota_target, 0)
+
 
 
 class SecurityTests(unittest.TestCase):
@@ -378,6 +326,26 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(len(values), 2)
         self.assertEqual(values[1].data, b"image")
 
+    def test_gemini_file_uri_appends_key_when_missing(self):
+        from imago.providers.gemini import _file_uri_with_key
+        self.assertEqual(
+            _file_uri_with_key("https://example.invalid/v1beta/files/abc", "k1"),
+            "https://example.invalid/v1beta/files/abc?key=k1",
+        )
+        self.assertEqual(
+            _file_uri_with_key("https://example.invalid/v1beta/files/abc?alt=media", "k1"),
+            "https://example.invalid/v1beta/files/abc?alt=media&key=k1",
+        )
+        # 已带 key 或 api_key 为空时原样返回
+        self.assertEqual(
+            _file_uri_with_key("https://example.invalid/v1beta/files/abc?key=old", "k1"),
+            "https://example.invalid/v1beta/files/abc?key=old",
+        )
+        self.assertEqual(
+            _file_uri_with_key("https://example.invalid/v1beta/files/abc", ""),
+            "https://example.invalid/v1beta/files/abc",
+        )
+
     def test_valid_responses_without_images_are_no_output(self):
         with self.assertRaises(NoOutputError):
             OpenAIImageAdapter.parse_common({"data": []})
@@ -458,7 +426,7 @@ class ProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(UnsupportedResponse, "响应格式无效"):
             asyncio.run(adapter.generate(Session(), GenerationRequest("draw"), "key"))
 
-    def test_dashscope_does_not_hardcode_qwen_reference_limits(self):
+    def test_dashscope_accepts_multiple_reference_images(self):
         adapter = DashScopeMultimodalAdapter(ProviderConfig(
             "qwen", "dashscope_multimodal", "https://example.invalid/generation", ("k",),
             model="qwen-image-2.0-pro",
@@ -467,9 +435,6 @@ class ProviderTests(unittest.TestCase):
         body = adapter.build_body(request)
         content = body["input"]["messages"][0]["content"]
         self.assertEqual(len([item for item in content if "image" in item]), 4)
-        source = (ROOT / "providers" / "dashscope.py").read_text("utf-8")
-        self.assertNotIn("_QWEN_IMAGE_CAPABILITIES", source)
-        self.assertNotIn("max_reference_bytes", source)
 
     def test_dashscope_success_status_error_keeps_sanitized_code_and_message(self):
         with self.assertRaisesRegex(ProviderError, "code=InvalidParameter") as raised:

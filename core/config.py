@@ -65,7 +65,6 @@ def load_config(raw: Mapping[str, Any]) -> RuntimeConfig:
     quota_raw = raw.get("quota_config", {}) or {}
     tasks = raw.get("task_config", {}) or {}
     storage = raw.get("storage_config", {}) or {}
-    logs = raw.get("log_config", {}) or {}
     style = _style(optimizer.get("optimizer_style", "default(通用)"))
     checkin_min = max(0, int(quota_raw.get("daily_checkin_quota_min", 1) or 0))
     checkin_max = max(checkin_min, int(quota_raw.get("daily_checkin_quota_max", 3) or 0))
@@ -86,11 +85,14 @@ def load_config(raw: Mapping[str, Any]) -> RuntimeConfig:
         vision_provider_id=str(optimizer.get("vision_provider_id", "")).strip(),
         optimizer_prompt=str(optimizer.get("optimizer_prompt", "")).strip(),
         optimizer_style=style,
+        fallback_style_injection=bool(optimizer.get("fallback_style_injection", False)),
         generation_timeout=max(30, int(tasks.get("generation_timeout", 300))),
         max_concurrent_tasks=max(1, int(tasks.get("max_concurrent_tasks", 2))),
+        llm_caption=bool(tasks.get("llm_caption", False)),
+        llm_caption_cm_context=bool(tasks.get("llm_caption_cm_context", False)),
+        llm_caption_pregen=bool(tasks.get("llm_caption_pregen", False)),
         max_upload_bytes=max(1, int(storage.get("max_upload_mb", 20) or 20)) * 1024 * 1024,
         temp_cache_bytes=max(16, int(storage.get("temp_cache_mb", 512) or 512)) * 1024 * 1024,
         block_private_networks=bool(storage.get("block_private_networks", True)),
-        debug_to_info=bool(logs.get("debug_to_info", False)),
-        log_with_bot_id=bool(logs.get("log_with_bot_id", False)),
+        log_with_bot_id=bool(raw.get("log_with_bot_id", False)),
     )

@@ -1,4 +1,10 @@
 {
+  "log_with_bot_id": {
+    "description": "日志区分机器人实例",
+    "type": "bool",
+    "default": false,
+    "hint": "启用后日志前缀附加机器人实例 ID，多 Bot 环境便于定位。日志等级请到 WebUI 插件详情页调整（运行期生效，无需重启）。"
+  },
   "providers": {
     "description": "图片生成节点",
     "type": "template_list",
@@ -105,6 +111,12 @@
         "options": ["None(无)", "default(通用)", "realistic(写实)", "cinematic(电影感)", "anime(动漫)", "3d(3D渲染)"],
         "default": "default(通用)",
         "hint": "追加到副脑自定义提示词；None(无) 不追加内置风格。用户当轮明确指定的风格优先。"
+      },
+      "fallback_style_injection": {
+        "description": "副脑降级时注入风格后缀",
+        "type": "bool",
+        "default": false,
+        "hint": "启用后，副脑关闭或调用失败降级时，将所选风格预设、副脑自定义提示词与默认第三方视角以低优先级英文后缀直接写入最终图片 prompt；关闭时降级路径保持原始描述，不注入任何后缀。副脑正常完成时始终由副脑消化风格，不再重复注入。"
       }
     }
   },
@@ -179,6 +191,24 @@
         "type": "int",
         "default": 2,
         "hint": "同时运行的完整任务数，最小 1；修改后动态生效，降低时不取消已运行任务。"
+      },
+      "llm_caption": {
+        "description": "主动 LLM 配文",
+        "type": "bool",
+        "default": false,
+        "hint": "出图成功或失败后，用会话 Chat Provider 按当前人设生成一句简短配文与结果一起发送；LLM 调用失败或时间预算不足时自动回退固定文案。"
+      },
+      "llm_caption_cm_context": {
+        "description": "配文接入 ChatMemory 上下文",
+        "type": "bool",
+        "default": false,
+        "hint": "配文 LLM 请求复用 ChatMemory 的接管上下文（需安装并启用 ChatMemory 且其 context takeover 开启）；关闭或查询失败时只携带任务局部上下文。"
+      },
+      "llm_caption_pregen": {
+        "description": "预生成成功版配文",
+        "type": "bool",
+        "default": false,
+        "hint": "与主动 LLM 配文配合：图片生成期间并行预生成成功版通用配文，出图成功直接使用、不再等待；任务失败时预生成结果丢弃，改为同步生成失败版配文（时间预算不足或 LLM 调用失败才回退固定文案）。出图成功但预生成失败时直接回退固定文案，不再二次调用。"
       }
     }
   },
@@ -204,25 +234,6 @@
         "type": "bool",
         "default": true,
         "hint": "拒绝 localhost、回环、局域网等非公网地址；仅在确需内网图片时关闭。"
-      }
-    }
-  },
-  "log_config": {
-    "description": "日志配置",
-    "type": "object",
-    "hint": "调整 Imago 诊断日志；不会记录密钥、完整图片数据或 Persona Prompt。",
-    "items": {
-      "debug_to_info": {
-        "description": "调试日志提级",
-        "type": "bool",
-        "default": false,
-        "hint": "将插件 debug 提升为 info，便于排障。"
-      },
-      "log_with_bot_id": {
-        "description": "日志区分机器人实例",
-        "type": "bool",
-        "default": false,
-        "hint": "在有消息上下文的日志前加 Bot 实例 ID，便于多 Bot 排查。"
       }
     }
   }

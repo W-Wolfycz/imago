@@ -1,6 +1,6 @@
 name: imago
 display_name: IMAGO·映相
-version: 1.0.1
+version: 1.0.2
 author: Wolfycz
 description: 支持通用绘图、Persona 出镜、绘图额度、视觉身份、多节点 fallback 与素材管理的异步图片生成插件
 repo: "https://github.com/W-Wolfycz/imago"

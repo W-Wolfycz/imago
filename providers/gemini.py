@@ -9,6 +9,18 @@ from ..core.errors import NoOutputError, UnsupportedResponse
 from ..core.models import GenerationRequest, ImageResult
 
 
+def _file_uri_with_key(uri: str, api_key: str) -> str:
+    """Files API 下载 URI 需要携带 API key；缺失时按查询参数规则追加。
+
+    已带 key 参数时原样返回；api_key 为空时不追加（可能是服务账号等
+    其他鉴权方式的部署）。
+    """
+    uri = str(uri or "")
+    if not uri or not api_key or "key=" in uri:
+        return uri
+    return f"{uri}{'&' if '?' in uri else '?'}key={quote(api_key, safe='')}"
+
+
 class GeminiAdapter(ProviderAdapter):
     async def generate(self, session, request: GenerationRequest, api_key: str):
         parts = [{"text": request.prompt}]
@@ -42,6 +54,7 @@ class GeminiAdapter(ProviderAdapter):
                 else:
                     file_data = part.get("fileData", {})
                     if isinstance(file_data, dict) and file_data.get("fileUri"):
-                        results.append(ImageResult(url=file_data["fileUri"]))
+                        # Files API 下载需带 key；缺失时补上，避免结果落盘下载 401。
+                        results.append(ImageResult(url=_file_uri_with_key(str(file_data["fileUri"]), api_key)))
         if not results: raise NoOutputError("Gemini 响应中没有图片")
         return results

@@ -18,6 +18,10 @@ def _err(message: str, status: int = 400):
     return jsonify({"success": False, "message": message}), status
 
 
+# 单次上传 Persona 参考图的数量上限（每张仍有 max_upload_bytes 大小限制）。
+MAX_UPLOAD_IMAGES = 20
+
+
 def _line_items(value) -> list[str]:
     values = value if isinstance(value, list) else str(value or "").splitlines()
     return [str(item).strip() for item in values if str(item).strip()]
@@ -61,6 +65,8 @@ class PageAPI:
             images = (body or {}).get("images", [])
             if not isinstance(images, list) or not images:
                 return _err("请选择至少一张图片")
+            if len(images) > MAX_UPLOAD_IMAGES:
+                return _err(f"单次最多上传 {MAX_UPLOAD_IMAGES} 张图片")
             added = []
             for image in images:
                 data = base64.b64decode(str(image.get("data", "")), validate=True)
@@ -202,6 +208,9 @@ class PageAPI:
                     "available_models": [str(value).strip() for value in (item.get("available_models", []) or []) if str(value).strip()],
                     "default_size": str(item.get("default_size", "1024x1024")).strip() or "1024x1024",
                     "timeout": max(10, int(item.get("timeout", 180) or 180)),
+                    # AstrBot 管理页校验 template_list 要求条目带模板键；
+                    # WebUI 保存同样带上，保证两种 UI 数据互相兼容。
+                    "__template_key": "provider",
                 })
                 seen.add(provider_id)
             if primary and primary not in seen:

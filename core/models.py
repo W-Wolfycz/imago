@@ -65,12 +65,15 @@ class RuntimeConfig:
     vision_provider_id: str = ""
     optimizer_prompt: str = ""
     optimizer_style: str = "default"
+    fallback_style_injection: bool = False
     generation_timeout: int = 300
     max_concurrent_tasks: int = 2
+    llm_caption: bool = False
+    llm_caption_cm_context: bool = False
+    llm_caption_pregen: bool = False
     max_upload_bytes: int = 20 * 1024 * 1024
     temp_cache_bytes: int = 512 * 1024 * 1024
     block_private_networks: bool = True
-    debug_to_info: bool = False
     log_with_bot_id: bool = False
 
 
