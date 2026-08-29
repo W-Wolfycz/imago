@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
+import ipaddress
 import re
+import socket
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse, urlunparse
 
 from .errors import ReferenceImageError, UnsupportedResponse
 from .models import ImageInput, ImageResult
-from .security import validate_remote_url
 
 DATA_URL = re.compile(r"^data:(image/(?:png|jpeg|webp|gif));base64,(.+)$", re.I | re.S)
 BASE64_URL = re.compile(r"^base64://([A-Za-z0-9+/=]*)$", re.S)
@@ -74,15 +76,56 @@ def _decode_base64_url(source: str, *, max_bytes: int) -> ImageInput:
     return ImageInput(data=data, mime_type=mime, filename=f"base64-reference.{suffix}")
 
 
+async def _resolve_checked_url(url: str, *, block_private: bool) -> tuple[str, dict | None]:
+    """解析、校验并把 http 域名固定为解析出的 IP（防 DNS rebinding）。
+
+    返回 ``(连接用 URL, 附加请求头)``：
+    - URL 形式校验（HTTP(S)、无内嵌凭据）与域名解析合并完成；
+    - ``block_private=True`` 时解析出的任何非公网地址直接拒绝；
+    - http 域名被重写为解析出的 IP 直连并携带原 Host 头，使校验与连接使用同一
+      次解析结果，消除 TOCTOU；https 保持原 URL（TLS 证书按 hostname 校验兜底，
+      rebinding 需要攻击者持有合法证书，不具备现实性）。
+    """
+    parsed = urlparse(url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+    ):
+        raise ValueError("只允许无内嵌凭据的 HTTP/HTTPS URL")
+    loop = asyncio.get_running_loop()
+    port = parsed.port or (80 if parsed.scheme == "http" else 443)
+    try:
+        infos = await loop.getaddrinfo(parsed.hostname, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValueError("无法解析远程主机") from exc
+    addresses = {info[4][0] for info in infos}
+    if block_private:
+        for address in addresses:
+            if not ipaddress.ip_address(address).is_global:
+                raise ValueError("不允许访问私网或本地地址")
+    if parsed.scheme == "http" and addresses:
+        ip = next(iter(addresses))
+        ip_host = f"[{ip}]" if ":" in ip else ip
+        netloc = f"{ip_host}:{parsed.port}" if parsed.port else ip_host
+        request_url = urlunparse(
+            (parsed.scheme, netloc, parsed.path or "/", parsed.params, parsed.query, parsed.fragment)
+        )
+        host_header = parsed.hostname if parsed.port is None else f"{parsed.hostname}:{parsed.port}"
+        return request_url, {"Host": host_header}
+    return url, None
+
+
 async def _fetch_http_reference(session, url: str, *, max_bytes: int, block_private: bool, verify_magic: bool) -> ImageInput:
     """HTTP(S) 参考图下载：allow_redirects=False + 手动有限跳转，逐跳做 SSRF 校验。
 
-    - 初始 URL 与每一跳 Location 都经过 ``validate_remote_url``（HTTP(S)/host 校验 +
-      ``block_private`` 私网/本地地址拦截）；校验失败统一抛 ``ReferenceImageError``
-      （初始 URL 保留原始原因文案，跳转目标用固定文案），不合法或超过跳数上限亦然。
+    - 初始 URL 与每一跳 Location 都经过 ``_resolve_checked_url``（形式校验 +
+      解析 + ``block_private`` 私网/本地地址拦截，http 域名固定 IP 直连）；
+      校验失败统一抛 ``ReferenceImageError``（初始 URL 保留原始原因文案，跳转
+      目标用固定文案），不合法或超过跳数上限亦然。
     - 相对 Location 按当前 URL 解析后再校验，避免把内网地址藏在相对跳转里。
-    - 本函数不附加任何凭据或请求头（与既有 ``session.get(source)`` 行为一致）；
-      URL 内嵌凭据由 ``validate_remote_url`` 拒绝，跨主机跳转也不会携带本函数附加的头。
+    - 本函数不附加任何凭据；URL 内嵌凭据被拒绝，跨主机跳转也不会携带本函数附加的头。
     - 空 body 一律拒绝；``verify_magic`` 为 True 时按文件魔数校验内容并以魔数为准
       （参考图路径），为 False 时信任 Content-Type 声明（生成结果下载保持宽松）。
     """
@@ -90,12 +133,12 @@ async def _fetch_http_reference(session, url: str, *, max_bytes: int, block_priv
     redirects = 0
     while True:
         try:
-            validate_remote_url(current, block_private=block_private)
+            request_url, extra_headers = await _resolve_checked_url(current, block_private=block_private)
         except ValueError as exc:
             if redirects == 0:
                 raise ReferenceImageError(str(exc)) from exc
             raise ReferenceImageError("参考图重定向目标不安全") from exc
-        async with session.get(current, allow_redirects=False) as response:
+        async with session.get(request_url, allow_redirects=False, headers=extra_headers) as response:
             if response.status in _REDIRECT_STATUSES:
                 redirects += 1
                 if redirects > MAX_REDIRECTS:

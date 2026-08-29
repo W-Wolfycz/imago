@@ -560,3 +560,33 @@ class FetchReferenceDataUrlTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ResolveCheckedUrlTests(unittest.IsolatedAsyncioTestCase):
+    async def test_http_ip_literal_is_pinned_with_host_header(self):
+        from imago.core.network import _resolve_checked_url
+        request_url, headers = await _resolve_checked_url("http://1.1.1.1/a.png", block_private=True)
+        self.assertEqual(request_url, "http://1.1.1.1/a.png")
+        self.assertEqual(headers, {"Host": "1.1.1.1"})
+
+    async def test_http_port_is_kept_in_netloc_and_host_header(self):
+        from imago.core.network import _resolve_checked_url
+        request_url, headers = await _resolve_checked_url("http://1.1.1.1:8080/x", block_private=True)
+        self.assertEqual(request_url, "http://1.1.1.1:8080/x")
+        self.assertEqual(headers, {"Host": "1.1.1.1:8080"})
+
+    async def test_private_ip_is_rejected(self):
+        from imago.core.network import _resolve_checked_url
+        with self.assertRaisesRegex(ValueError, "私网"):
+            await _resolve_checked_url("http://127.0.0.1/x", block_private=True)
+
+    async def test_private_allowed_when_block_disabled(self):
+        from imago.core.network import _resolve_checked_url
+        request_url, headers = await _resolve_checked_url("http://127.0.0.1/x", block_private=False)
+        self.assertEqual(request_url, "http://127.0.0.1/x")
+
+    async def test_https_keeps_original_url_without_host_header(self):
+        from imago.core.network import _resolve_checked_url
+        request_url, headers = await _resolve_checked_url("https://1.1.1.1/a.png", block_private=True)
+        self.assertEqual(request_url, "https://1.1.1.1/a.png")
+        self.assertIsNone(headers)

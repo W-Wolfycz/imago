@@ -53,6 +53,18 @@ class ConfigTests(unittest.TestCase):
             load_config({"optimizer_config": {"fallback_style_injection": True}}).fallback_style_injection
         )
 
+    def test_reference_caption_defaults_false(self):
+        self.assertFalse(load_config({}).reference_caption)
+        self.assertTrue(
+            load_config({"optimizer_config": {"reference_caption": True}}).reference_caption
+        )
+
+    def test_llm_retry_default_and_bounds(self):
+        self.assertEqual(load_config({}).llm_retry, 1)
+        self.assertEqual(load_config({"task_config": {"llm_retry": 0}}).llm_retry, 1)
+        self.assertEqual(load_config({"task_config": {"llm_retry": 9}}).llm_retry, 5)
+        self.assertEqual(load_config({"task_config": {"llm_retry": 3}}).llm_retry, 3)
+
     def test_llm_caption_defaults_false(self):
         self.assertFalse(load_config({}).llm_caption)
         self.assertTrue(load_config({"task_config": {"llm_caption": True}}).llm_caption)
@@ -232,11 +244,12 @@ class PersonaStoreTests(unittest.TestCase):
 
 
 class QuotaStoreTests(unittest.TestCase):
-    def test_only_plain_failed_state_is_refundable(self):
+    def test_failed_and_cancelled_states_are_refundable(self):
         for state in TaskState:
-            expected = 3 if state == TaskState.FAILED else 0
+            expected = 3 if state in (TaskState.FAILED, TaskState.CANCELLED) else 0
             self.assertEqual(terminal_refund_amount(state, 3), expected, state.value)
         self.assertEqual(terminal_refund_amount(TaskState.FAILED, 0), 0)
+        self.assertEqual(terminal_refund_amount(TaskState.CANCELLED, 0), 0)
 
     def test_daily_refresh_resets_low_and_high_balances_to_target(self):
         with tempfile.TemporaryDirectory() as tmp:

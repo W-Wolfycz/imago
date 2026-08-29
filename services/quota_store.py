@@ -17,8 +17,10 @@ USER_ID = re.compile(r"^[A-Za-z0-9_.:@-]{1,128}$")
 
 
 def terminal_refund_amount(state: TaskState, charged: int) -> int:
-    """只有普通 failed 退回本次实际扣除额度。"""
-    return max(0, int(charged)) if state == TaskState.FAILED else 0
+    """普通 failed 与取消（插件重载/关闭时任务被 cancel）退回本次实际扣除额度。"""
+    if state in (TaskState.FAILED, TaskState.CANCELLED):
+        return max(0, int(charged))
+    return 0
 
 
 @dataclass(frozen=True, slots=True)

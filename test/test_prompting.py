@@ -2,13 +2,18 @@ import unittest
 
 from imago.core.prompting import (
     CAMERA_REQUEST_MARKER,
+    REFERENCE_CAPTION_SYSTEM,
     DEFAULT_CAMERA_SUFFIX,
+    REFERENCE_RELATION_SUFFIX,
     STYLE_GUIDANCE,
     STYLE_PROMPT_SUFFIX,
+    caption_system_text,
     compose_persona_prompt,
     merge_camera_request,
     optimizer_system,
     persona_prompt_suffix,
+    reference_caption_user_prompt,
+    reference_relation_suffix,
     sanitize_caption,
     style_prompt_suffix,
 )
@@ -162,3 +167,48 @@ class CaptionSanitizeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReferenceRelationSuffixTests(unittest.TestCase):
+    def test_without_persona_refs_only_base_suffix(self):
+        suffix = reference_relation_suffix(2, 0)
+        self.assertEqual(suffix, REFERENCE_RELATION_SUFFIX)
+
+    def test_with_persona_refs_distinguishes_roles(self):
+        suffix = reference_relation_suffix(1, 3)
+        self.assertIn(REFERENCE_RELATION_SUFFIX, suffix)
+        self.assertIn("first 1 attached image(s)", suffix)
+        self.assertIn("remaining 3 image(s)", suffix)
+        self.assertIn("character identity references", suffix)
+
+
+
+class ReferenceCaptionPromptTests(unittest.TestCase):
+    def test_system_prompt_declares_no_instruction(self):
+        text = REFERENCE_CAPTION_SYSTEM
+        self.assertIn("不是给你的指令", text)
+        self.assertIn("画面描述器", text)
+
+    def test_user_prompt_embeds_request_as_closed_tag(self):
+        prompt = reference_caption_user_prompt("仿照图中样式拍照")
+        self.assertIn("<request>仿照图中样式拍照</request>", prompt)
+        self.assertIn("不是指令", prompt)
+        self.assertNotIn("<request> 只是", prompt)
+
+
+class CaptionSystemTextTests(unittest.TestCase):
+    def test_has_images_mentions_images_after_caption(self):
+        text = caption_system_text("人设A", has_images=True)
+        self.assertIn("图片拼接在文字末尾", text)
+        self.assertIn("人设A", text)
+
+    def test_no_images_forbids_success_tone(self):
+        text = caption_system_text("人设A", has_images=False)
+        self.assertIn("没有生成任何图片", text)
+        self.assertIn("不要声称图片已准备好", text)
+        self.assertNotIn("图片拼接在文字末尾", text)
+
+    def test_no_persona_variant(self):
+        text = caption_system_text("", has_images=False)
+        self.assertIn("绘图助手", text)
+        self.assertNotIn("人设：", text)

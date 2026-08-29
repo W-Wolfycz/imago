@@ -63,11 +63,13 @@ class RuntimeConfig:
     optimizer_enabled: bool = True
     optimizer_provider_id: str = ""
     vision_provider_id: str = ""
+    reference_caption: bool = False
     optimizer_prompt: str = ""
     optimizer_style: str = "default"
     fallback_style_injection: bool = False
     generation_timeout: int = 300
     max_concurrent_tasks: int = 2
+    llm_retry: int = 1
     llm_caption: bool = False
     llm_caption_cm_context: bool = False
     llm_caption_pregen: bool = False

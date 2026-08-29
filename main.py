@@ -27,12 +27,17 @@ from .core.models import DrawTask, GenerationRequest, ImageInput, ImageResult, T
 from .core.network import fetch_reference, materialize_result
 from .core.references import ReferencePlanner
 from .core.prompting import (
+    REFERENCE_CAPTION_SYSTEM,
+    REFERENCE_RELATION_SUFFIX,
     SUMMARY_SYSTEM,
     VISION_SYSTEM,
+    caption_system_text,
     compose_persona_prompt,
     merge_camera_request,
     optimizer_system,
     persona_optimizer_input,
+    reference_caption_user_prompt,
+    reference_relation_suffix,
     sanitize_caption,
     summary_user_prompt,
     vision_user_prompt,
@@ -49,7 +54,7 @@ PENDING_DRAW = "🎨 收到灵感，正在绘制，请稍后…… ✨"
 PENDING_PHOTO = "📸 正在为当前人设「{persona}」拍摄，请稍后……"
 
 
-@register("imago", "Wolfycz", "异步图片生成与 Persona 素材管理", "1.0.2")
+@register("imago", "Wolfycz", "异步图片生成与 Persona 素材管理", "1.1.0")
 class Imago(Star):
     _STAGE_LABELS = {
         TaskStage.QUEUED: "排队中",
@@ -88,29 +93,6 @@ class Imago(Star):
         )
         self.quota_store = QuotaStore(data_dir, self._quota_today)
 
-    def _migrate_legacy_log_config(self) -> None:
-        """旧版 log_config 分组（debug_to_info / log_with_bot_id）一次性迁移。
-
-        仅在顶层新键 ``log_with_bot_id`` 不存在时执行：把旧分组中的值搬到顶层，
-        随后删除整个旧分组并落盘。迁移后新键常驻，用户在新配置界面的修改只写
-        新键，旧值不会反向覆盖新配置（AstrBotConfig 加载时保留 schema 外的旧键，
-        简单 fallback 读取会在“用户关闭开关”后仍被残留旧值覆盖）。
-        """
-        raw = self.raw_config
-        if not isinstance(raw, dict) or "log_with_bot_id" in raw:
-            return
-        legacy = raw.get("log_config")
-        if not isinstance(legacy, dict):
-            return
-        raw["log_with_bot_id"] = bool(legacy.get("log_with_bot_id", False))
-        raw.pop("log_config", None)
-        save_fn = getattr(raw, "save_config", None)
-        if callable(save_fn):
-            try:
-                save_fn()
-            except Exception:
-                logger.warning("[Imago] 旧日志配置迁移已应用，但落盘失败（仅本次运行生效）")
-
     def _migrate_provider_template_keys(self) -> None:
         """给 providers 条目补齐 AstrBot 管理页要求的模板键并落盘。
 
@@ -140,7 +122,6 @@ class Imago(Star):
                 logger.warning("[Imago] providers 模板键补齐已应用，但落盘失败（仅本次运行生效）")
 
     async def initialize(self):
-        self._migrate_legacy_log_config()
         self._migrate_provider_template_keys()
         self.session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, connect=15))
         self.scheduler = TaskScheduler(lambda: load_config(self.raw_config), self.session, self._finish_task, self._provider_error, self._scheduler_debug)
@@ -341,7 +322,13 @@ class Imago(Star):
             "[Imago] LLM请求 purpose=%s provider=%s images=%d system=%s input=%s",
             purpose, redact_debug(provider_id), len(image_urls or []), redact_debug(system), redact_debug(prompt),
         )
-        result = await self.context.llm_generate(chat_provider_id=provider_id, prompt=prompt, system_prompt=system, image_urls=image_urls or [])
+        result = await self.context.llm_generate(
+            chat_provider_id=provider_id,
+            prompt=prompt,
+            system_prompt=system,
+            image_urls=image_urls or [],
+            request_max_retries=cfg.llm_retry,
+        )
         text = getattr(result, "completion_text", None) or getattr(result, "text", None) or str(result)
         text = " ".join(text.split())
         self._debug("[Imago] LLM响应 purpose=%s provider=%s output=%s", purpose, redact_debug(provider_id), redact_debug(text))
@@ -408,7 +395,15 @@ class Imago(Star):
                 conversation_persona_id = getattr(conversation, "persona_id", None) or None
         except Exception:
             pass
-        provider_settings = self.context.get_config(umo=umo).get("provider_settings", {})
+        provider_settings = {}
+        try:
+            # 与主链 _decorate_llm_request 的数据源对齐：全局 provider_settings
+            # 优先，回退会话命中的 umo 级配置（见 _session_persona_prompt 注释）。
+            global_ps = (self.context.get_config() or {}).get("provider_settings", {}) or {}
+            umo_ps = (self.context.get_config(umo=umo) or {}).get("provider_settings", {}) or {}
+            provider_settings = global_ps or umo_ps
+        except Exception:
+            provider_settings = {}
         persona_id, persona, _, _ = await resolver(
             umo=umo,
             conversation_persona_id=conversation_persona_id,
@@ -496,6 +491,19 @@ class Imago(Star):
             reply_resolved,
             len(background_deferred),
         )
+        # 参考图解析清单（脱敏来源）：用于定位“指令传图未生效”类问题的
+        # 来源分解（本地组件/引用消息/正文 URL/明确远程图）。
+        deferred_detail = ",".join(
+            f"{item.get('kind')}:{redact_debug(str(item.get('source', '') or 'reply'))}"
+            for item in deferred_references
+        ) or "-"
+        self._debug(
+            "%s task=%s 参考图解析清单 deferred=[%s] 最终引用数=%d",
+            self._log_prefix(event),
+            task.id[:8],
+            deferred_detail,
+            len(task.request.references),
+        )
         try:
             task_id = self.scheduler.submit(task)
         except Exception:
@@ -535,6 +543,13 @@ class Imago(Star):
             return
         if not sources and strict:
             raise ValueError("引用消息图片无法获取")
+        if sources:
+            self._debug(
+                "%s 引用消息图片解析成功 count=%d strict=%s",
+                self._log_prefix(event),
+                len(sources),
+                strict,
+            )
         for source in sources or []:
             try:
                 image = await fetch_reference(
@@ -568,6 +583,13 @@ class Imago(Star):
                 if digest not in seen:
                     seen.add(digest)
                     task.request.references.append(image)
+                self._debug(
+                    "%s task=%s 后台参考图解析成功 source=%s bytes=%d",
+                    self._log_prefix(event),
+                    task.id[:8],
+                    redact_debug(str(source)),
+                    len(image.data),
+                )
             except Exception as exc:
                 self._debug("%s task=%s 后台参考图解析失败 type=%s", self._log_prefix(event), task.id[:8], type(exc).__name__)
                 if strict:
@@ -650,18 +672,74 @@ class Imago(Star):
             await add_source(source, strict=bool(item.get("strict", True)))
         return references
 
+    async def _describe_references(self, task: DrawTask) -> str:
+        """用识图 Provider 描述显式参考图（reference_caption 开关启用时）。
+
+        复用任务输入缓存中已落盘的参考图文件（persist_task_inputs 的产物），
+        最多取前 3 张；识图失败/未配置/超时返回空串，静默降级不阻断任务。
+        """
+        cfg = load_config(self.raw_config)
+        provider_id = (cfg.vision_provider_id or "").strip()
+        if not provider_id:
+            return ""
+        image_paths = []
+        try:
+            directory = self.store.task_dir(task.id) / "inputs"
+            for record in task.runtime.get("input_records", []) or []:
+                name = record.get("file") if isinstance(record, dict) else None
+                if name:
+                    image_paths.append(str(directory / name))
+        except Exception:
+            image_paths = []
+        if not image_paths:
+            return ""
+        try:
+            result = await asyncio.wait_for(
+                self.context.llm_generate(
+                    chat_provider_id=provider_id,
+                    prompt=reference_caption_user_prompt(task.request.prompt),
+                    system_prompt=REFERENCE_CAPTION_SYSTEM,
+                    image_urls=image_paths[:3],
+                    request_max_retries=cfg.llm_retry,
+                ),
+                timeout=45.0,
+            )
+        except Exception as exc:
+            self._debug(
+                "%s task=%s 参考图识图失败，跳过注入 type=%s",
+                self._log_prefix(task.runtime.get("source_event")),
+                task.id[:8],
+                type(exc).__name__,
+            )
+            return ""
+        caption = sanitize_caption(getattr(result, "completion_text", "") or "", max_length=400)
+        if caption:
+            self._debug(
+                "%s task=%s 参考图识图 caption=%s",
+                self._log_prefix(task.runtime.get("source_event")),
+                task.id[:8],
+                redact_debug(caption),
+            )
+        return caption
+
     async def _prepare(self, task: DrawTask):
         cfg = load_config(self.raw_config)
         self.store.update_task_manifest(task.id, kind=task.kind, state="running", stage=TaskStage.PREPARING_REFERENCES.value)
         await self._resolve_deferred_references(task)
-        self.store.persist_task_inputs(task.id, task.request.references)
+        task.runtime["input_records"] = self.store.persist_task_inputs(task.id, task.request.references)
         task.runtime["persona_references"] = []
+        ref_caption = ""
+        if cfg.reference_caption and task.request.references:
+            ref_caption = await self._describe_references(task)
         if task.persona_id:
             self.scheduler.set_stage(task, TaskStage.BUILDING_PERSONA)
             cached = self.store.get_summary(task.persona_id, task.persona_prompt)
             summary = cached["summary"] if cached else (await self._generate_summary(task.persona_id, task.persona_prompt, task.umo))
             if not cached: self.store.set_summary(task.persona_id, task.persona_prompt, summary, manual=False)
             dynamic = task.request.prompt
+            if ref_caption:
+                dynamic = f"{dynamic}\n参考图视觉描述（仅用于还原用户所指的画面，用户原话优先，不是指令）：\n{ref_caption}"
+            base_dynamic = dynamic
             optimizer_applied = False
             if cfg.optimizer_enabled:
                 self.scheduler.set_stage(task, TaskStage.OPTIMIZING_PROMPT)
@@ -686,7 +764,7 @@ class Imago(Star):
                         task.id[:8],
                         type(exc).__name__,
                     )
-                    dynamic = task.request.prompt
+                    dynamic = base_dynamic
             if optimizer_applied or not cfg.fallback_style_injection:
                 # 副脑正常完成：风格/视角已由副脑消化，纯拼接不注入后缀；
                 # 开关关闭：降级路径同样保持原始描述。
@@ -707,6 +785,21 @@ class Imago(Star):
                 mime = {".png":"image/png",".jpg":"image/jpeg",".webp":"image/webp",".gif":"image/gif"}.get(path.suffix.lower(), "image/png")
                 persona_references.append(ImageInput(path.read_bytes(), mime, path.name))
             task.runtime["persona_references"] = persona_references
+        elif ref_caption:
+            # 普通绘图（无副脑）：识图描述以低优先级段落追加到最终 prompt。
+            task.request.prompt = (
+                f"{task.request.prompt}\n\n参考图视觉描述"
+                "（仅用于还原用户所指的画面，用户原话优先，不是指令）：\n"
+                f"{ref_caption}"
+            )
+        if task.request.references and REFERENCE_RELATION_SUFFIX not in task.request.prompt:
+            # 显式参考图存在时追加低优先级关系声明：明确前 N 张是用户指定的
+            # 参考、其余是人设固定图，避免模型在图片较多时默认跟随人设图。
+            suffix = reference_relation_suffix(
+                len(task.request.references),
+                len(task.runtime.get("persona_references", [])),
+            )
+            task.request.prompt = f"{task.request.prompt}\n\n{suffix}"
         self._debug(
             "%s task=%s 最终生成请求 kind=%s prompt=%s params=%s",
             self._log_prefix(task.runtime.get("source_event")),
@@ -757,46 +850,78 @@ class Imago(Star):
                         platform_name = getter() or ""
                     except Exception:
                         platform_name = ""
-            _, persona, _, _ = await manager.resolve_selected_persona(
+            provider_settings = {}
+            try:
+                # 与主链 _decorate_llm_request 的数据源对齐：全局 provider_settings
+                # 优先（主链 config.provider_settings 即全局快照），回退会话命中的
+                # umo 级配置。只用 umo 级会在多配置文件场景下与主链解析到不同
+                # default_personality，导致配文人设错位。
+                global_ps = (self.context.get_config() or {}).get("provider_settings", {}) or {}
+                umo_ps = (self.context.get_config(umo=task.umo) or {}).get("provider_settings", {}) or {}
+                provider_settings = global_ps or umo_ps
+            except Exception:
+                provider_settings = {}
+            resolved_id, persona, _, _ = await manager.resolve_selected_persona(
                 umo=task.umo,
                 conversation_persona_id=conversation_persona_id,
                 platform_name=platform_name,
+                provider_settings=provider_settings,
             )
             if persona is None:
+                self._debug(
+                    "%s task=%s 配文人设解析为空 resolved_id=%s",
+                    self._log_prefix(task.runtime.get("source_event")),
+                    task.id[:8],
+                    str(resolved_id or ""),
+                )
                 return ""
             prompt = (
                 persona.get("prompt", "")
                 if isinstance(persona, dict)
                 else getattr(persona, "prompt", "")
             )
+            self._debug(
+                "%s task=%s 配文人设来源=session resolved_id=%s prompt_len=%d",
+                self._log_prefix(task.runtime.get("source_event")),
+                task.id[:8],
+                str(resolved_id or ""),
+                len(str(prompt or "")),
+            )
             return str(prompt or "").strip()
         except Exception:
             return ""
 
-    async def _caption_system(self, task: DrawTask, *, cm_contexts: bool = False) -> str:
-        """配文 LLM 的 system prompt：人设口吻 + 图片位置说明（图片拼在文字末尾）。
+    async def _caption_system(
+        self,
+        task: DrawTask,
+        *,
+        cm_contexts: bool = False,
+        has_images: bool = True,
+    ) -> str:
+        """配文 LLM 的 system prompt：人设口吻 + 按结果区分的图片说明。
 
         普通绘图任务没有 task.persona_prompt，改从会话当前生效人设解析，保证
-        配文语气与正常对话人格一致。cm_contexts=True（接入 ChatMemory 接管上下
-        文）时追加 cm_ 标签规则说明：独立 llm_generate 请求不经过 CM 的 hook，
-        CM 不会向本请求注入通用规则，必须自带轻量复述。
+        配文语气与正常对话人格一致。has_images=False（失败/超时，无图）时图片
+        说明改为禁止声称图片已准备好，避免与 user prompt 的失败结果矛盾。
+        cm_contexts=True（接入 ChatMemory 接管上下文）时追加 cm_ 标签规则说明：
+        独立 llm_generate 请求不经过 CM 的 hook，CM 不会向本请求注入通用规则，
+        必须自带轻量复述。
         """
-        persona_prompt = (task.persona_prompt or "").strip() or await self._session_persona_prompt(task)
-        if persona_prompt:
-            base = (
-                "你是当前会话人设，请用她的语气给用户写一句简短的图片任务结果说明。"
-                "要求：1-2 句话，自然口语化，不要复述画面提示词，不要承诺完成时间，"
-                "不要输出说明以外的任何内容。你写的这句话会与随后发送的若干张图片"
-                "一起送达用户，图片拼接在文字末尾，请据此自然地告知用户图片已准备好。\n\n人设：\n"
-                + persona_prompt
-            )
-        else:
-            base = (
-                "你是绘图助手，请用自然语气给用户写一句简短的图片任务结果说明。"
-                "要求：1-2 句话，不要复述画面提示词，不要承诺完成时间，"
-                "不要输出说明以外的任何内容。你写的这句话会与随后发送的若干张图片"
-                "一起送达用户，图片拼接在文字末尾，请据此自然地告知用户图片已准备好。"
-            )
+        persona_prompt = (task.persona_prompt or "").strip()
+        persona_source = "task" if persona_prompt else ""
+        if not persona_prompt:
+            persona_prompt = await self._session_persona_prompt(task)
+            persona_source = "session" if persona_prompt else "none"
+        self._debug(
+            "%s task=%s 配文system 人设来源=%s persona_len=%d cm_contexts=%s has_images=%s",
+            self._log_prefix(task.runtime.get("source_event")),
+            task.id[:8],
+            persona_source,
+            len(persona_prompt),
+            cm_contexts,
+            has_images,
+        )
+        base = caption_system_text(persona_prompt, has_images)
         if cm_contexts:
             # 与 ChatMemory 通用规则语义一致的轻量复述（不导入对方模块）。
             base += (
@@ -851,6 +976,7 @@ class Imago(Star):
                 prompt=user_prompt,
                 system_prompt=await self._caption_system(task, cm_contexts=contexts is not None),
                 contexts=contexts,
+                request_max_retries=cfg.llm_retry,
             )
         except Exception as exc:
             self._debug("%s task=%s 预生成配文失败 type=%s", self._log_prefix(task.runtime.get("source_event")), task.id[:8], type(exc).__name__)
@@ -869,7 +995,10 @@ class Imago(Star):
         """
         cfg = load_config(self.raw_config)
         remaining = cfg.generation_timeout - (time.monotonic() - task.created_at)
-        if remaining <= 10:
+        # 为发送阶段（装饰链 + 平台发送）预留充足预算：剩余不足 20 秒直接跳过
+        # 配文，配文最长也只允许把预算吃到剩 15 秒，杜绝配文拖死任务导致
+        # 图片已生成却超时静默。
+        if remaining <= 20:
             return ""
         provider_id = await self._caption_provider_id(task)
         if not provider_id:
@@ -889,14 +1018,19 @@ class Imago(Star):
             "请按人设给用户一句简短通知。"
         )
         contexts = await self._caption_contexts(task, cfg)
-        timeout = min(45.0, max(5.0, remaining - 5))
+        timeout = min(45.0, max(5.0, remaining - 15))
         try:
             response = await asyncio.wait_for(
                 self.context.llm_generate(
                     chat_provider_id=provider_id,
                     prompt=user_prompt,
-                    system_prompt=await self._caption_system(task, cm_contexts=contexts is not None),
+                    system_prompt=await self._caption_system(
+                        task,
+                        cm_contexts=contexts is not None,
+                        has_images=generation_success,
+                    ),
                     contexts=contexts,
+                    request_max_retries=cfg.llm_retry,
                 ),
                 timeout=timeout,
             )
@@ -938,7 +1072,15 @@ class Imago(Star):
                 if isinstance(value, Path): output_paths.append(value)
                 chain.append(Image.fromFileSystem(str(value)) if isinstance(value, Path) else Image.fromURL(value))
                 self._debug("%s task=%s 生成结果已落盘 index=%d bytes=%d", self._log_prefix(task.runtime.get("source_event")), task.id[:8], len(chain), value.stat().st_size if isinstance(value, Path) else 0)
-            except Exception as exc: task.errors.append(type(exc).__name__)
+            except Exception as exc:
+                task.errors.append(type(exc).__name__)
+                self._debug(
+                    "%s task=%s 生成结果落盘失败 index=%d type=%s",
+                    self._log_prefix(task.runtime.get("source_event")),
+                    task.id[:8],
+                    len(chain),
+                    type(exc).__name__,
+                )
         if output_paths:
             self.store.record_task_outputs(task.id, output_paths)
         usable_output_count = len(chain)
@@ -976,7 +1118,7 @@ class Imago(Star):
                 # 等待超时或失败则回退固定文案，不再二次同步生成。
                 try:
                     remaining = cfg.generation_timeout - (time.monotonic() - task.created_at)
-                    timeout = min(45.0, max(5.0, remaining - 5))
+                    timeout = min(45.0, max(5.0, remaining - 15))
                     caption = await asyncio.wait_for(pregen_task, timeout=timeout)
                 except Exception as exc:
                     self._debug("%s task=%s 预生成配文不可用，回退固定文案 type=%s", self._log_prefix(event), task.id[:8], type(exc).__name__)
@@ -1084,6 +1226,37 @@ class Imago(Star):
         pregen_task = task.runtime.get("caption_pregen_task")
         if pregen_task is not None and not pregen_task.done():
             pregen_task.cancel()
+
+        # 终态汇总日志：成功/取消走 info，无输出走 warning，失败/超时/投递失败走 error。
+        elapsed = max(0, int(time.monotonic() - task.created_at))
+        prefix = self._log_prefix(task.runtime.get("source_event"))
+        usable = max(0, int(task.runtime.get("usable_output_count", 0) or 0))
+        attempts = ",".join(task.runtime.get("attempt_errors", [])[-8:]) or "-"
+        if task.state in (TaskState.FAILED, TaskState.TIMED_OUT, TaskState.DELIVERY_FAILED):
+            logger.error(
+                "%s task=%s 终态 %s 耗时=%ds usable=%d errors=%s attempts=%s",
+                prefix,
+                task.id[:8],
+                task.state.value,
+                elapsed,
+                usable,
+                ",".join(task.errors[-8:]) or "-",
+                attempts,
+            )
+        elif task.state == TaskState.NO_OUTPUT:
+            logger.warning(
+                "%s task=%s 终态 %s 耗时=%ds attempts=%s",
+                prefix, task.id[:8], task.state.value, elapsed, attempts,
+            )
+        else:
+            delivery_ok = bool(
+                task.runtime.get("image_delivery_success", False)
+                or task.runtime.get("notification_delivery_success", False)
+            )
+            logger.info(
+                "%s task=%s 终态 %s 耗时=%ds usable=%d delivery_ok=%s",
+                prefix, task.id[:8], task.state.value, elapsed, usable, delivery_ok,
+            )
 
         def delivery(prefix: str) -> dict:
             attempted = bool(task.runtime.get(f"{prefix}_attempted", False))
@@ -1327,7 +1500,9 @@ class Imago(Star):
         当前会话 Persona 本人需要出镜时应改用 generate_persona_image。
         用户只是讨论、评价或询问已有图片时不要调用。
         用户当前消息、引用消息及消息正文中可访问的 HTTP/HTTPS 图片会自动作为本轮参考图；
-        插件会等待这些图片完成本地化后再请求图片节点。工具只创建后台任务，不等待生成完成。
+        插件会等待这些图片完成本地化后再请求图片节点。本轮存在参考图时，prompt 必须明确
+        写出与参考图的关系（例如“基于参考图，保持主体不变，改为动漫风格”），不得只写
+        全新的画面描述。工具只创建后台任务，不等待生成完成。
         不得承诺完成百分比、排队名次或准确完成时间。
 
         Args:
@@ -1356,7 +1531,9 @@ class Imago(Star):
         用户只是讨论、评价或询问已有照片时不要调用。
         不要在 action 中重复 Persona 的稳定外貌；插件会自动加入外观摘要和 Persona 固定参考图。
         用户当前消息、引用消息及消息正文中可访问的 HTTP/HTTPS 图片也会自动加入本轮参考图；
-        插件会等待这些图片完成本地化后再请求图片节点。工具只创建后台任务，不等待生成完成。
+        插件会等待这些图片完成本地化后再请求图片节点。本轮存在参考图时，action 必须明确
+        写出与参考图的关系（例如“基于参考图，保持主体不变，改为动漫风格”），不得只写
+        全新的画面描述。工具只创建后台任务，不等待生成完成。
         不得承诺完成百分比、排队名次或准确完成时间。
 
         Args:

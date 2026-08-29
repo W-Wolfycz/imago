@@ -144,6 +144,13 @@ class TaskScheduler:
             remaining = config.generation_timeout - max(0.0, time.monotonic() - task.created_at)
             if remaining <= 0:
                 raise asyncio.TimeoutError
+            self.debug(
+                task,
+                "task=%s 开始执行 kind=%s timeout=%.0fs queued=%.1fs request_count=%d",
+                task.id[:8], task.kind, remaining,
+                max(0.0, time.monotonic() - task.created_at),
+                task.request.count,
+            )
             async with asyncio.timeout(remaining):
                 async with self._limiter.slot():
                     task.state = TaskState.RUNNING
@@ -173,7 +180,15 @@ class TaskScheduler:
             task.state = TaskState.TIMED_OUT
             task.runtime.setdefault("generation_success", False)
             task.runtime.setdefault("usable_output_count", 0)
-            if not task.runtime.get("runner_started"):
+            # 超时时若 runner 尚未运行，或已运行但投递没有完成，补发一次超时通知：
+            # 配文/发送把预算耗尽时用户不应静默收不到任何消息。runner 已运行时
+            # _send_terminal_notice 会以空结果重跑 _finish_task（预算已尽的失败
+            # 通知路径，配文会因 remaining 不足直接跳过，不会再次拖超时）。
+            delivery_success = bool(
+                task.runtime.get("image_delivery_success", False)
+                or task.runtime.get("notification_delivery_success", False)
+            )
+            if not task.runtime.get("runner_started") or not delivery_success:
                 await self._send_terminal_notice(task)
         except asyncio.CancelledError:
             task.state = TaskState.CANCELLED
@@ -323,6 +338,14 @@ class TaskScheduler:
                     self.logger(attempt, wrapped, task)
         # 零输出说明至少一次 Provider 请求已经完成并可能产生费用。
         # 仍走完整 fallback；全部尝试结束后以 no_output 结算，避免误按 failed 退款。
+        self.debug(
+            task,
+            "task=%s 全部节点尝试结束 attempts=%d no_output=%s last_error=%s",
+            task.id[:8],
+            len(task.runtime.get("attempt_errors", [])),
+            bool(no_output_error),
+            type(last_error).__name__ if last_error else "-",
+        )
         raise no_output_error or last_error or ProviderError("所有节点都失败")
 
     async def close(self) -> None:

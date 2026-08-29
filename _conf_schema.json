@@ -15,61 +15,67 @@
         "name": "图片生成节点",
         "hint": "图片 Provider。主节点请在 Plugin Page（WebUI）设置；未设置或无效时默认第一个有效节点。",
         "items": {
-        "id": {
-          "description": "节点 ID",
-          "type": "string",
-          "default": "primary",
-          "hint": "列表内唯一标识，仅用于日志和内部定位；不要填账号等敏感信息。"
-        },
-        "api_type": {
-          "description": "接口类型",
-          "type": "string",
-          "options": ["openai_image", "openai_chat", "gemini_official", "dashscope_multimodal", "custom_endpoint"],
-          "default": "openai_image",
-          "hint": "示例：openai_image=OpenAI images，openai_chat=chat/completions，gemini_official=Gemini，dashscope_multimodal=百炼，custom_endpoint=Imago JSON。"
-        },
-        "base_url": {
-          "description": "接口地址",
-          "type": "string",
-          "default": "",
-          "hint": "示例：OpenAI `https://api.example.com/v1`；Gemini `https://generativelanguage.googleapis.com/v1beta`；百炼/custom 填可直接 POST 的完整 URL。"
-        },
-        "api_keys": {
-          "description": "API Keys（每行一个）",
-          "type": "list",
-          "default": [],
-          "hint": "多行填写多个 Key，每行一个；每个节点内按调用顺序轮换，不随机挑选。"
-        },
-        "model": {
-          "description": "默认模型",
-          "type": "string",
-          "default": "",
-          "hint": "默认图片模型 ID，必须与接口协议匹配。"
-        },
-        "reference_image_limit": {
-          "description": "参考图总上限",
-          "type": "int",
-          "default": 0,
-          "hint": "消息附图优先，剩余名额再抽 Persona 图。例：上限 3 且带 1 张用户图时，最多取 2 张 Persona 图；0=不限制，主/备模型共用。"
-        },
-        "available_models": {
-          "description": "备选模型列表",
-          "type": "list",
-          "default": [],
-          "hint": "默认模型失败后按顺序尝试；所有模型须共用本节点的协议和 Base URL。"
-        },
-        "default_size": {
-          "description": "默认图片尺寸",
-          "type": "string",
-          "default": "1024x1024",
-          "hint": "未指定尺寸时使用，如 1024x1024；须为模型支持值，百炼会自动转为 *。"
-        },
-        "timeout": {
-          "description": "单次节点超时（秒）",
-          "type": "int",
-          "default": 180,
-          "hint": "单次 Provider 请求超时，最小 10 秒；同时受任务总超时限制。"
-        }
+          "id": {
+            "description": "节点 ID",
+            "type": "string",
+            "default": "primary",
+            "hint": "列表内唯一标识，仅用于日志和内部定位；不要填账号等敏感信息。"
+          },
+          "api_type": {
+            "description": "接口类型",
+            "type": "string",
+            "options": [
+              "openai_image",
+              "openai_chat",
+              "gemini_official",
+              "dashscope_multimodal",
+              "custom_endpoint"
+            ],
+            "default": "openai_image",
+            "hint": "openai_image=OpenAI images；openai_chat=chat/completions；gemini_official=Gemini；dashscope_multimodal=百炼；custom_endpoint=Imago JSON。"
+          },
+          "base_url": {
+            "description": "接口地址",
+            "type": "string",
+            "default": "",
+            "hint": "OpenAI 填 `https://host/v1`；Gemini 填 `https://generativelanguage.googleapis.com/v1beta`；百炼/custom 填可直接 POST 的完整 URL。"
+          },
+          "api_keys": {
+            "description": "API Keys（每行一个）",
+            "type": "list",
+            "default": [],
+            "hint": "多行填写多个 Key，每行一个；每个节点内按调用顺序轮换，不随机挑选。"
+          },
+          "model": {
+            "description": "默认模型",
+            "type": "string",
+            "default": "",
+            "hint": "默认图片模型 ID，必须与接口协议匹配。"
+          },
+          "reference_image_limit": {
+            "description": "参考图总上限",
+            "type": "int",
+            "default": 0,
+            "hint": "消息附图优先，剩余名额再抽 Persona 图。例：上限 3 且带 1 张用户图时，最多取 2 张 Persona 图；0=不限制，主/备模型共用。"
+          },
+          "available_models": {
+            "description": "备选模型列表",
+            "type": "list",
+            "default": [],
+            "hint": "默认模型失败后按顺序尝试；所有模型须共用本节点的协议和 Base URL。"
+          },
+          "default_size": {
+            "description": "默认图片尺寸",
+            "type": "string",
+            "default": "1024x1024",
+            "hint": "未指定尺寸时使用，如 1024x1024；须为模型支持值，百炼会自动转为 *。"
+          },
+          "timeout": {
+            "description": "单次节点超时（秒）",
+            "type": "int",
+            "default": 180,
+            "hint": "单次 Provider 请求超时，最小 10 秒；同时受任务总超时限制。"
+          }
         }
       }
     }
@@ -99,6 +105,12 @@
         "_special": "select_provider",
         "hint": "仅在 Plugin Page 勾选参考图并手动重建摘要时调用；必须选择支持图片输入的 Provider。留空则只按 Persona Prompt 摘要。"
       },
+      "reference_caption": {
+        "description": "指令参考图识图",
+        "type": "bool",
+        "default": false,
+        "hint": "为消息附带的显式参考图生成视觉描述并注入提示词（需已配置识图 Provider）：拍照并入副脑输入、普通绘图追加到 prompt；失败自动跳过。"
+      },
       "optimizer_prompt": {
         "description": "副脑自定义提示词",
         "type": "text",
@@ -108,7 +120,14 @@
       "optimizer_style": {
         "description": "副脑风格预设",
         "type": "string",
-        "options": ["None(无)", "default(通用)", "realistic(写实)", "cinematic(电影感)", "anime(动漫)", "3d(3D渲染)"],
+        "options": [
+          "None(无)",
+          "default(通用)",
+          "realistic(写实)",
+          "cinematic(电影感)",
+          "anime(动漫)",
+          "3d(3D渲染)"
+        ],
         "default": "default(通用)",
         "hint": "追加到副脑自定义提示词；None(无) 不追加内置风格。用户当轮明确指定的风格优先。"
       },
@@ -116,7 +135,7 @@
         "description": "副脑降级时注入风格后缀",
         "type": "bool",
         "default": false,
-        "hint": "启用后，副脑关闭或调用失败降级时，将所选风格预设、副脑自定义提示词与默认第三方视角以低优先级英文后缀直接写入最终图片 prompt；关闭时降级路径保持原始描述，不注入任何后缀。副脑正常完成时始终由副脑消化风格，不再重复注入。"
+        "hint": "启用后，副脑关闭或调用失败降级时把风格预设、自定义提示词与默认视角以低优先级后缀写入最终 prompt；关闭则保持原始描述。"
       }
     }
   },
@@ -186,6 +205,12 @@
         "default": 300,
         "hint": "从创建到发送前的总超时，包含排队、处理和 Provider 请求，最小 30 秒。"
       },
+      "llm_retry": {
+        "description": "LLM 调用重试次数",
+        "type": "int",
+        "default": 1,
+        "hint": "imago 发起的 LLM 调用（副脑/摘要/识图/配文）可重试错误的最大尝试次数（含首次），范围 1-5；AstrBot 全局默认 5 次。"
+      },
       "max_concurrent_tasks": {
         "description": "最大并发任务数",
         "type": "int",
@@ -202,13 +227,13 @@
         "description": "配文接入 ChatMemory 上下文",
         "type": "bool",
         "default": false,
-        "hint": "配文 LLM 请求复用 ChatMemory 的接管上下文（需安装并启用 ChatMemory 且其 context takeover 开启）；关闭或查询失败时只携带任务局部上下文。"
+        "hint": "配文请求复用 ChatMemory 接管上下文（需 ChatMemory 开启 context takeover）；关闭时仅携带任务局部上下文。"
       },
       "llm_caption_pregen": {
         "description": "预生成成功版配文",
         "type": "bool",
         "default": false,
-        "hint": "与主动 LLM 配文配合：图片生成期间并行预生成成功版通用配文，出图成功直接使用、不再等待；任务失败时预生成结果丢弃，改为同步生成失败版配文（时间预算不足或 LLM 调用失败才回退固定文案）。出图成功但预生成失败时直接回退固定文案，不再二次调用。"
+        "hint": "与主动 LLM 配文配合：图片生成期间并行预生成成功版通用配文，出图成功直接使用；失败时预生成结果丢弃。成本与限流风险见 README。"
       }
     }
   },
