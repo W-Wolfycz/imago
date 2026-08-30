@@ -16,6 +16,7 @@ except ImportError:  # 允许在不含 AstrBot 运行依赖的源码环境运行
 
 from ..core.errors import ConfigurationError, NoOutputError, ProviderError
 from ..core.models import DrawTask, ImageResult, TaskStage, TaskState
+from ..core.prompting import REFERENCE_RELATION_SUFFIX, reference_relation_suffix
 from ..providers import ADAPTERS
 
 
@@ -117,10 +118,19 @@ class TaskScheduler:
         else:
             selected_persona = persona_references
         references = [*explicit_references, *selected_persona]
+        prompt = task.request.prompt
+        if explicit_references and REFERENCE_RELATION_SUFFIX not in prompt:
+            # 低优先级关系声明按本节点实际采样数量追加：前 N 张是用户指定参考、
+            # 其余是人设固定图，避免模型在图片较多时默认跟随人设图（按全量池
+            # 计数会在 reference_image_limit 采样后数量虚高）。
+            prompt = (
+                f"{prompt}\n\n"
+                f"{reference_relation_suffix(len(explicit_references), len(selected_persona))}"
+            )
         task.runtime["current_explicit_reference_count"] = len(explicit_references)
         task.runtime["current_persona_reference_count"] = len(selected_persona)
         task.runtime["current_reference_count"] = len(references)
-        return replace(task.request, references=references)
+        return replace(task.request, references=references, prompt=prompt)
 
     @staticmethod
     def set_stage(task: DrawTask, stage: TaskStage) -> None:
@@ -180,15 +190,21 @@ class TaskScheduler:
             task.state = TaskState.TIMED_OUT
             task.runtime.setdefault("generation_success", False)
             task.runtime.setdefault("usable_output_count", 0)
-            # 超时时若 runner 尚未运行，或已运行但投递没有完成，补发一次超时通知：
-            # 配文/发送把预算耗尽时用户不应静默收不到任何消息。runner 已运行时
-            # _send_terminal_notice 会以空结果重跑 _finish_task（预算已尽的失败
-            # 通知路径，配文会因 remaining 不足直接跳过，不会再次拖超时）。
+            # 超时时若主发送流程尚未完成（runner 未运行，或已运行但平台发送没
+            # 走完且没有成功投递记录），补发一次超时通知：配文/发送把预算耗尽时
+            # 用户不应静默收不到任何消息。runner 已完成主发送（_finish_task 已置
+            # runner_send_completed）则不再补发，避免平台已收到主消息又被终态
+            # 通知重复打扰。_send_terminal_notice 会以空结果重跑 _finish_task
+            # （预算已尽的失败通知路径，配文会因 remaining 不足直接跳过，不会
+            # 再次拖超时）。
             delivery_success = bool(
                 task.runtime.get("image_delivery_success", False)
                 or task.runtime.get("notification_delivery_success", False)
             )
-            if not task.runtime.get("runner_started") or not delivery_success:
+            send_completed = bool(task.runtime.get("runner_send_completed", False))
+            if not send_completed and (
+                not task.runtime.get("runner_started") or not delivery_success
+            ):
                 await self._send_terminal_notice(task)
         except asyncio.CancelledError:
             task.state = TaskState.CANCELLED

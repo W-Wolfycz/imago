@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 DEFAULT_OPTIMIZER_SYSTEM = """将本轮画面需求整理为准确、具体、可直接交给图片模型的提示词。保留用户明确指定的主体、数量、画面文字、动作、场景、服饰、视角、构图和风格，不得补写会改变用户意图的关键设定。"""
 
 STYLE_GUIDANCE = {
@@ -176,13 +178,15 @@ def style_prompt_suffix(style: str) -> str:
     return STYLE_PROMPT_SUFFIX.get(style, "")
 
 
-def persona_prompt_suffix(style: str, custom_prompt: str = "") -> str:
-    """Persona 最终 prompt 的降级注入块：自定义提示词（若有） + 风格后缀（若有）
-    + 默认第三方视角后缀（总是包含）。仅用于副脑降级且开关启用时。"""
+def persona_prompt_suffix(style: str) -> str:
+    """Persona 最终 prompt 的降级注入块：非 none/default 风格后缀（若有）+
+    默认第三方视角后缀（总是包含）。仅用于副脑降级且开关启用时。
+
+    不注入 optimizer_prompt：那是面向副脑的元指令（"将本轮画面需求整理为…"），
+    不是图片模型能消费的视觉描述，注入会污染出图。用户希望自定义视觉后缀时
+    应写在风格预设/副脑提示词里由副脑消化，降级路径只兜底视角与风格预设。
+    """
     parts: list[str] = []
-    custom = (custom_prompt or "").strip()
-    if custom:
-        parts.append(custom)
     style_suffix = style_prompt_suffix(style)
     if style_suffix:
         parts.append(style_suffix)
@@ -194,20 +198,19 @@ def compose_persona_prompt(
     summary: str,
     dynamic_prompt: str,
     style: str = "",
-    custom_prompt: str = "",
     *,
     fallback_suffix: bool = False,
 ) -> str:
     """组合最终 Persona 图片 prompt。
 
     fallback_suffix=False（默认，副脑正常完成时）只做纯拼接，不注入任何后缀；
-    fallback_suffix=True（副脑降级且开关启用时）追加低优先级注入块：自定义提示词、
-    非 none/default 风格的低优先级风格预设，以及默认第三方视角后缀（措辞保证与
-    用户明确要求冲突时以用户为准）。
+    fallback_suffix=True（副脑降级且开关启用时）追加低优先级注入块：非 none/
+    default 风格预设与默认第三方视角后缀（措辞保证与用户明确要求冲突时以
+    用户为准），不再注入副脑自定义提示词（元指令语义，见 persona_prompt_suffix）。
     """
     base = f"Character identity (stable): {summary}\nCurrent scene: {dynamic_prompt}".strip()
     if fallback_suffix:
-        suffix = persona_prompt_suffix(style, custom_prompt)
+        suffix = persona_prompt_suffix(style)
         if suffix:
             base = f"{base}\n\n{suffix}"
     return base
@@ -230,7 +233,7 @@ def merge_camera_request(action: str, camera: str) -> str:
 def sanitize_caption(text: str, max_length: int = 300) -> str:
     """整理配文：压缩空白并按长度截断。
 
-    内容清洗（如占位字样、泄漏标签）交给发送装饰链（ChatMemory 等装饰器插件）
-    处理，imago 不做内容替换。
+    不做 ChatMemory `<cm_*>` 标签清洗：那是 CM 装饰链的职责，imago 不耦合
+    其他插件的内部格式；配文经主动发送走装饰链时由 CM 自行清理。
     """
     return " ".join((text or "").split())[:max_length]

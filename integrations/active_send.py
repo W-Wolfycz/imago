@@ -97,11 +97,17 @@ class ProactiveSender:
                 return platform
         manager = getattr(self.context, "platform_manager", None)
         return next(
-            (item for item in getattr(manager, "platform_insts", []) if item.meta().id == session.platform_id),
+            (
+                item
+                for item in getattr(manager, "platform_insts", [])
+                if item.meta().id == session.platform_id
+            ),
             None,
         )
 
-    def build_event(self, umo: str, source, chain: list, before_send=None) -> _ProactiveMessageEvent:
+    def build_event(
+        self, umo: str, source, chain: list, before_send=None
+    ) -> _ProactiveMessageEvent:
         session = MessageSession.from_str(umo)
         platform = self._platform(session)
         if platform is None:
@@ -115,10 +121,17 @@ class ProactiveSender:
         message.message_id = ""
         message.self_id = str(getattr(source_message, "self_id", "") or "bot")
         message.sender = MessageMember(
-            user_id=str(getattr(sender, "user_id", "") or getattr(source, "get_sender_id", lambda: "")()),
+            user_id=str(
+                getattr(sender, "user_id", "")
+                or getattr(source, "get_sender_id", lambda: "")()
+            ),
             nickname=getattr(sender, "nickname", None),
         )
-        message.group = Group(group_id=session.session_id) if session.message_type == MessageType.GROUP_MESSAGE else None
+        message.group = (
+            Group(group_id=session.session_id)
+            if session.message_type == MessageType.GROUP_MESSAGE
+            else None
+        )
         message.message = []
         message.message_str = ""
         message.raw_message = None
@@ -163,7 +176,10 @@ class ProactiveSender:
             except BaseException as exc:
                 self.logger(f"Hook 执行异常 event={event_type.name}", exc)
 
-    async def send(self, umo: str, source, chain: list, before_send=None) -> SendOutcome:
+    async def send(
+        self, umo: str, source, chain: list, before_send=None
+    ) -> SendOutcome:
+        """主动发送适配：装饰链 → 发送 → after 钩子。"""
         try:
             event = self.build_event(umo, source, chain, before_send=before_send)
         except Exception as exc:
@@ -180,19 +196,29 @@ class ProactiveSender:
             )
         result = event.get_result()
         processed = list(getattr(result, "chain", None) or [])
-        self.debug("[Imago] 主动发送装饰完成 components=%d stopped=%s", len(processed), event.is_stopped())
+        self.debug(
+            "[Imago] 主动发送装饰完成 components=%d stopped=%s",
+            len(processed),
+            event.is_stopped(),
+        )
         error = ""
         success = True
         if processed:
             event.begin_send_stage()
             try:
-                success = bool(await self.context.send_message(umo, MessageChain(chain=processed)))
+                success = bool(
+                    await self.context.send_message(umo, MessageChain(chain=processed))
+                )
                 if not success:
                     error = "PlatformNotFound"
             except Exception as exc:
                 success = False
                 error = type(exc).__name__
                 self.logger("主动消息发送异常", exc)
+        else:
+            # 装饰链把结果清空但未 stop_event：没有任何内容可发，不得记成功。
+            success = False
+            error = "DecoratorSuppressed"
         await self._run_hooks(event, EventType.OnAfterMessageSentEvent)
         if event.side_send_error:
             success = False

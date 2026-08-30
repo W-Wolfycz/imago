@@ -558,10 +558,6 @@ class FetchReferenceDataUrlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image.mime_type, "image/png")
         self.assertEqual(image.data, PNG)
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ResolveCheckedUrlTests(unittest.IsolatedAsyncioTestCase):
     async def test_http_ip_literal_is_pinned_with_host_header(self):
         from imago.core.network import _resolve_checked_url
@@ -590,3 +586,7 @@ class ResolveCheckedUrlTests(unittest.IsolatedAsyncioTestCase):
         request_url, headers = await _resolve_checked_url("https://1.1.1.1/a.png", block_private=True)
         self.assertEqual(request_url, "https://1.1.1.1/a.png")
         self.assertIsNone(headers)
+
+
+if __name__ == "__main__":
+    unittest.main()

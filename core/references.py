@@ -7,8 +7,8 @@
 
 对本地不可读的明确 Image 组件按来源分类处理：
 - HTTP(S)：不调用 converter，进入 strict deferred，由后台
-  ``fetch_reference`` 执行 ``validate_remote_url``/``block_private_networks``
-  的 SSRF 校验与大小限制，避免绕过 imago 自身的远程下载策略；
+  ``fetch_reference`` 执行逐跳 SSRF 校验与大小限制，避免绕过 imago 自身的
+  远程下载策略；
 - ``data:``/``base64://``：事件阶段立即用 ``fetch_reference(None, ...)``
   解码接管（不需要 session），保留魔数识别与大小校验；
 - 本地路径 / ``file:`` URI：直接读入内存；

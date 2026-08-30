@@ -25,11 +25,9 @@ class PersonaStore:
         self.summaries = root / "summaries.json"
         self.settings = root / "settings.json"
         self.references = root / "persona_references"
-        self.temp = root / "temp"
         self.task_cache = root / "task_cache"
         self._max_upload_bytes = max_upload_bytes
         self.references.mkdir(parents=True, exist_ok=True)
-        self.temp.mkdir(parents=True, exist_ok=True)
         self.task_cache.mkdir(parents=True, exist_ok=True)
 
     @property
@@ -99,11 +97,6 @@ class PersonaStore:
         protected = {self._task_id(value) for value in (protected or set())}
         directories = [path for path in self.task_cache.iterdir() if path.is_dir() and path.name not in protected]
         total = sum(path.stat().st_size for path in self.task_cache.rglob("*") if path.is_file())
-        temp_files = sorted(
-            (item for item in self.temp.rglob("*") if item.is_file()),
-            key=lambda item: item.stat().st_mtime,
-        )
-        total += sum(path.stat().st_size for path in temp_files)
         if total <= limit:
             return
         for directory in sorted(directories, key=lambda path: path.stat().st_mtime):
@@ -112,15 +105,6 @@ class PersonaStore:
             total -= size
             if total <= limit:
                 break
-        for path in temp_files:
-            if total <= limit:
-                break
-            try:
-                size = path.stat().st_size
-                path.unlink()
-                total -= size
-            except OSError:
-                continue
 
     @staticmethod
     def prompt_hash(prompt: str) -> str:
@@ -136,8 +120,14 @@ class PersonaStore:
     def _save_summaries(self, value: dict[str, dict]) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         temporary = self.summaries.with_suffix(".tmp")
-        temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), "utf-8")
-        os.replace(temporary, self.summaries)
+        try:
+            temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2), "utf-8")
+            os.replace(temporary, self.summaries)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def get_primary_provider_id(self) -> str:
         try:
@@ -149,8 +139,14 @@ class PersonaStore:
     def set_primary_provider_id(self, provider_id: str) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
         temporary = self.settings.with_suffix(".tmp")
-        temporary.write_text(json.dumps({"primary_provider_id": provider_id}, ensure_ascii=False, indent=2), "utf-8")
-        os.replace(temporary, self.settings)
+        try:
+            temporary.write_text(json.dumps({"primary_provider_id": provider_id}, ensure_ascii=False, indent=2), "utf-8")
+            os.replace(temporary, self.settings)
+        finally:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def get_summary(self, persona_id: str, prompt: str) -> dict | None:
         item = self._load_summaries().get(persona_id)

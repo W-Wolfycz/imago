@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-import ipaddress
 import json
 import re
-import socket
 from pathlib import Path
-from urllib.parse import urlparse
 
 SENSITIVE = re.compile(r"(?i)(api[_-]?key|authorization|token|secret|password)\s*[:=]\s*([^\s,;}]+)")
 EXTRA_KEY = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,31}$")
-BLOCKED_EXTRA = {"url", "base_url", "authorization", "api_key", "token", "secret", "password", "timeout", "file", "path"}
+# 除凭据/网络键外，还必须拦截会覆盖请求保留字段的键：n/model/size/prompt/count
+# 可绕过 count 1-4 上限或覆盖节点配置，messages 可整体替换请求体。
+BLOCKED_EXTRA = {
+    "url", "base_url", "authorization", "api_key", "token", "secret", "password",
+    "timeout", "file", "path", "n", "model", "size", "prompt", "count", "messages",
+}
 
 
 def redact(value: object) -> str:
@@ -40,22 +42,6 @@ def ensure_child(root: Path, candidate: Path) -> Path:
     if resolved != root and root not in resolved.parents:
         raise ValueError("路径越界")
     return resolved
-
-
-def validate_remote_url(url: str, *, block_private: bool = True) -> str:
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
-        raise ValueError("只允许无内嵌凭据的 HTTP/HTTPS URL")
-    if block_private:
-        try:
-            addresses = {item[4][0] for item in socket.getaddrinfo(parsed.hostname, parsed.port or 443)}
-        except OSError as exc:
-            raise ValueError("无法解析远程主机") from exc
-        for address in addresses:
-            ip = ipaddress.ip_address(address)
-            if not ip.is_global:
-                raise ValueError("不允许访问私网或本地地址")
-    return url
 
 
 def parse_extra_params(text: str) -> dict[str, str]:

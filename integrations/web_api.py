@@ -27,6 +27,17 @@ def _line_items(value) -> list[str]:
     return [str(item).strip() for item in values if str(item).strip()]
 
 
+def _safe_int(value, default: int, minimum: int | None = None) -> int:
+    """配置值转整数并兜底：手工改坏（非数字/null）时回退默认，不抛 500。"""
+    try:
+        result = int(value or default)
+    except (TypeError, ValueError):
+        result = default
+    if minimum is not None:
+        result = max(minimum, result)
+    return result
+
+
 class PageAPI:
     def __init__(self, plugin):
         self.plugin = plugin
@@ -144,12 +155,12 @@ class PageAPI:
                 "id": provider_id,
                 "api_type": str(item.get("api_type", "")),
                 "model": str(item.get("model", "")),
-                "reference_image_limit": max(0, int(item.get("reference_image_limit", 0) or 0)),
+                "reference_image_limit": _safe_int(item.get("reference_image_limit"), 0, 0),
                 "available_models": [str(value) for value in (item.get("available_models", []) or [])],
                 "base_url": str(item.get("base_url", "")),
                 "api_keys_configured": has_keys,
                 "default_size": str(item.get("default_size", "1024x1024")),
-                "timeout": max(10, int(item.get("timeout", 180) or 180)),
+                "timeout": _safe_int(item.get("timeout"), 180, 10),
                 "complete": complete,
             })
             seen.add(provider_id)
@@ -264,6 +275,8 @@ class PageAPI:
             return _err("无法保存绘图额度", 500)
 
     async def set_primary_provider(self):
+        # 目前 WebUI 走 providers/save 一并提交 primary_provider_id，本路由未被
+        # 前端调用；保留作为独立 API 入口（命令 /imago provider-primary 同功能）。
         try:
             body = await request.get_json(force=True)
             provider_id = str((body or {}).get("provider_id", "")).strip()

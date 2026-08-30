@@ -131,10 +131,15 @@ class ComposePersonaPromptTests(unittest.TestCase):
         ):
             self.assertEqual(prompt, "Character identity (stable): s\nCurrent scene: d")
 
-    def test_custom_prompt_falls_into_fallback_block(self):
-        prompt = compose_persona_prompt("s", "d", custom_prompt="低优先级自定义风格", fallback_suffix=True)
-        self.assertIn("低优先级自定义风格", prompt)
+    def test_fallback_block_never_injects_optimizer_meta_prompt(self):
+        # 副脑元指令（optimizer_prompt）不得进入图片 prompt：降级块只含风格
+        # 预设与默认视角后缀。
+        meta = "将本轮画面需求整理为准确、具体、可直接交给图片模型的提示词"
+        prompt = compose_persona_prompt("s", "d", style="realistic", fallback_suffix=True)
+        self.assertNotIn(meta, prompt)
+        self.assertNotIn("低优先级自定义风格", prompt)
         self.assertIn(DEFAULT_CAMERA_SUFFIX, prompt)
+        self.assertIn(STYLE_PROMPT_SUFFIX["realistic"], prompt)
 
 
 class PersonaOptimizerProtocolTests(unittest.TestCase):
@@ -163,10 +168,6 @@ class CaptionSanitizeTests(unittest.TestCase):
 
     def test_sanitize_caption_empty(self):
         self.assertEqual(sanitize_caption("  "), "")
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class ReferenceRelationSuffixTests(unittest.TestCase):
@@ -212,3 +213,7 @@ class CaptionSystemTextTests(unittest.TestCase):
         text = caption_system_text("", has_images=False)
         self.assertIn("绘图助手", text)
         self.assertNotIn("人设：", text)
+
+
+if __name__ == "__main__":
+    unittest.main()

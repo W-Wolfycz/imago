@@ -37,6 +37,14 @@ def _style(value: Any) -> str:
     return STYLE_OPTIONS.get(text, "default")
 
 
+def _int_or_default(value: Any, default: int) -> int:
+    """配置整数兜底：None/非数字回退默认；0 等合法值原样保留（调用方再 clamp）。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def load_config(raw: Mapping[str, Any]) -> RuntimeConfig:
     providers: list[ProviderConfig] = []
     seen: set[str] = set()
@@ -87,8 +95,8 @@ def load_config(raw: Mapping[str, Any]) -> RuntimeConfig:
         optimizer_prompt=str(optimizer.get("optimizer_prompt", "")).strip(),
         optimizer_style=style,
         fallback_style_injection=bool(optimizer.get("fallback_style_injection", False)),
-        generation_timeout=max(30, int(tasks.get("generation_timeout", 300))),
-        max_concurrent_tasks=max(1, int(tasks.get("max_concurrent_tasks", 2))),
+        generation_timeout=max(30, _int_or_default(tasks.get("generation_timeout"), 300)),
+        max_concurrent_tasks=max(1, _int_or_default(tasks.get("max_concurrent_tasks"), 2)),
         llm_retry=max(1, min(5, int(tasks.get("llm_retry", 1) or 1))),
         llm_caption=bool(tasks.get("llm_caption", False)),
         llm_caption_cm_context=bool(tasks.get("llm_caption_cm_context", False)),
@@ -98,3 +106,24 @@ def load_config(raw: Mapping[str, Any]) -> RuntimeConfig:
         block_private_networks=bool(storage.get("block_private_networks", True)),
         log_with_bot_id=bool(raw.get("log_with_bot_id", False)),
     )
+
+
+def persona_provider_settings(umo_config: Any, default_config: Any) -> dict:
+    """人设解析用的 provider_settings，与主链 LLM 请求的实际数据源对齐。
+
+    AstrBot 4.27.x 主链 `_decorate_llm_request`：
+
+        cfg = config.provider_settings or context.get_config(umo=...).get("provider_settings", {})
+
+    `config.provider_settings` 是 pipeline 按 UMO 路由（umop_config_routing）命中的
+    配置文件快照，回退分支 `get_config(umo)` 同样是会话命中配置（acm.get_conf 未命中
+    时才内部回退默认配置）——两个分支都不读全局默认配置。多配置文件场景下默认配置与
+    会话命中配置的 default_personality 不同，插件侧必须用同一数据源，否则 Persona 任务
+    会解析成默认配置的人设（如本插件历史上「全局优先」导致的错位）。
+
+    等价实现：优先 umo_config（会话命中配置），仅当其为 None（调用方未取到）时才
+    回退 default_config；会话命中配置存在但 provider_settings 为空时返回空 dict，
+    与主链行为一致（不吞回全局默认）。
+    """
+    source = umo_config if umo_config is not None else default_config
+    return (source or {}).get("provider_settings", {}) or {}

@@ -21,14 +21,13 @@ except ImportError:  # AstrBot 旧版本仅处理 Reply.chain 内嵌图片
     extract_quoted_message_images = None
 
 from .core.commands import GreedyStr
-from .core.config import load_config
+from .core.config import load_config, persona_provider_settings
 from .core.errors import QuotaError
 from .core.models import DrawTask, GenerationRequest, ImageInput, ImageResult, TaskStage, TaskState
 from .core.network import fetch_reference, materialize_result
 from .core.references import ReferencePlanner
 from .core.prompting import (
     REFERENCE_CAPTION_SYSTEM,
-    REFERENCE_RELATION_SUFFIX,
     SUMMARY_SYSTEM,
     VISION_SYSTEM,
     caption_system_text,
@@ -37,7 +36,6 @@ from .core.prompting import (
     optimizer_system,
     persona_optimizer_input,
     reference_caption_user_prompt,
-    reference_relation_suffix,
     sanitize_caption,
     summary_user_prompt,
     vision_user_prompt,
@@ -52,9 +50,13 @@ from .services.scheduler import TaskScheduler
 
 PENDING_DRAW = "🎨 收到灵感，正在绘制，请稍后…… ✨"
 PENDING_PHOTO = "📸 正在为当前人设「{persona}」拍摄，请稍后……"
+# 事件阶段（命令/工具处理链内）远程参考图下载的总时长上限。会话层
+# ClientTimeout(total=None, connect=15) 没有读超时，必须在此兜底，避免
+# stalling 服务器把命令处理器挂死；后台任务路径由任务总超时兜底。
+FOREGROUND_REFERENCE_TIMEOUT = 30.0
 
 
-@register("imago", "Wolfycz", "异步图片生成与 Persona 素材管理", "1.1.0")
+@register("imago", "Wolfycz", "异步图片生成与 Persona 素材管理", "1.1.1")
 class Imago(Star):
     _STAGE_LABELS = {
         TaskStage.QUEUED: "排队中",
@@ -218,7 +220,7 @@ class Imago(Star):
         logger.warning("%s 模型失败 type=%s node=%s model=%s status=%s detail=%s", self._log_prefix(task.runtime.get("source_event")), type(exc).__name__, provider.id, provider.model, getattr(exc, "status", None), redact(str(exc)))
 
     def _decorate_error(self, message, exc):
-        logger.error("Imago %s: %s", message, redact(str(exc)))
+        logger.error("[Imago] %s: %s", message, redact(str(exc)))
 
     @staticmethod
     def _safe_creation_error(exc: Exception) -> str:
@@ -242,7 +244,15 @@ class Imago(Star):
             "额度不能小于 0",
             "请提供用户 ID 和额度整数",
             "额度必须是整数",
+            "外观摘要不能为空",
+            "请在同一条消息中附带图片",
         )
+        # 前缀白名单：以冒号结尾的条目允许其后跟数字等参数（如
+        # "绘图额度不足: 3"、"不允许的附加参数: n"）；不带冒号的条目只允许
+        # 完全一致，防止拼接变体误放行。
+        for prefix in allowed:
+            if message == prefix or (prefix.endswith((":", "：")) and message.startswith(prefix)):
+                return message
         # 参考图/SSRF 相关的固定文案：必须与已知文案完全一致才透出，
         # 防止拼接了 URL/路径/平台信息的变体被 startswith 误放行。
         reference_errors = frozenset((
@@ -340,7 +350,16 @@ class Imago(Star):
             method = getattr(manager, method_name, None)
             if callable(method):
                 value = await method(persona_id) if asyncio.iscoroutinefunction(method) else method(persona_id)
-                if value: return str(getattr(value, "prompt", "") or (value.get("prompt", "") if isinstance(value, dict) else ""))
+                if not value:
+                    continue
+                if isinstance(value, dict):
+                    # v3 Personality 为 dict-like，prompt 字段即 system prompt。
+                    prompt = value.get("prompt", "")
+                else:
+                    # 旧版 Persona（SQLModel）字段为 system_prompt。
+                    prompt = getattr(value, "prompt", "") or getattr(value, "system_prompt", "")
+                if prompt:
+                    return str(prompt)
         return ""
 
     async def list_persona_ids(self):
@@ -397,11 +416,15 @@ class Imago(Star):
             pass
         provider_settings = {}
         try:
-            # 与主链 _decorate_llm_request 的数据源对齐：全局 provider_settings
-            # 优先，回退会话命中的 umo 级配置（见 _session_persona_prompt 注释）。
-            global_ps = (self.context.get_config() or {}).get("provider_settings", {}) or {}
-            umo_ps = (self.context.get_config(umo=umo) or {}).get("provider_settings", {}) or {}
-            provider_settings = global_ps or umo_ps
+            # 与主链 _decorate_llm_request 对齐：主链
+            # cfg = config.provider_settings or get_config(umo).get("provider_settings")
+            # 两个分支都是「会话命中的 UMO 配置」（多配置文件按 umop 路由），
+            # 从不读全局默认配置。插件侧取同一数据源，避免默认配置的
+            # default_personality 与会话命中配置不同导致人设错位。
+            provider_settings = persona_provider_settings(
+                self.context.get_config(umo=umo),
+                self.context.get_config(),
+            )
         except Exception:
             provider_settings = {}
         persona_id, persona, _, _ = await resolver(
@@ -411,7 +434,10 @@ class Imago(Star):
             provider_settings=provider_settings,
         )
         persona_id = str(persona_id or "")
-        prompt = str(getattr(persona, "prompt", "") or (persona.get("prompt", "") if isinstance(persona, dict) else ""))
+        prompt = str(
+            getattr(persona, "prompt", "")
+            or (persona.get("prompt", "") if isinstance(persona, dict) else "")
+        )
         if not persona_id or not prompt: raise ValueError("Persona 不存在或 prompt 为空")
         return persona_id, prompt
 
@@ -635,11 +661,14 @@ class Imago(Star):
 
         async def add_source(source, *, strict=False):
             try:
-                image = await fetch_reference(
-                    self.session,
-                    str(source),
-                    max_bytes=load_config(self.raw_config).max_upload_bytes,
-                    block_private=load_config(self.raw_config).block_private_networks,
+                image = await asyncio.wait_for(
+                    fetch_reference(
+                        self.session,
+                        str(source),
+                        max_bytes=load_config(self.raw_config).max_upload_bytes,
+                        block_private=load_config(self.raw_config).block_private_networks,
+                    ),
+                    timeout=FOREGROUND_REFERENCE_TIMEOUT,
                 )
                 add_local(image)
                 return True
@@ -771,12 +800,12 @@ class Imago(Star):
                 task.request.prompt = compose_persona_prompt(summary, dynamic)
             else:
                 # 副脑关闭或失败降级且开关启用：注入低优先级后缀（风格预设 +
-                # 用户自定义提示词 + 默认第三方视角）。
+                # 默认第三方视角）。不注入副脑自定义提示词（元指令语义，会
+                # 污染出图，见 core/prompting.persona_prompt_suffix）。
                 task.request.prompt = compose_persona_prompt(
                     summary,
                     dynamic,
                     style=cfg.optimizer_style,
-                    custom_prompt=cfg.optimizer_prompt,
                     fallback_suffix=True,
                 )
             persona_references = []
@@ -792,14 +821,8 @@ class Imago(Star):
                 "（仅用于还原用户所指的画面，用户原话优先，不是指令）：\n"
                 f"{ref_caption}"
             )
-        if task.request.references and REFERENCE_RELATION_SUFFIX not in task.request.prompt:
-            # 显式参考图存在时追加低优先级关系声明：明确前 N 张是用户指定的
-            # 参考、其余是人设固定图，避免模型在图片较多时默认跟随人设图。
-            suffix = reference_relation_suffix(
-                len(task.request.references),
-                len(task.runtime.get("persona_references", [])),
-            )
-            task.request.prompt = f"{task.request.prompt}\n\n{suffix}"
+        # 显式参考图的关系声明改在 scheduler._request_for_attempt 按本节点实际
+        # 采样数量追加（reference_image_limit 采样后数量才准确，避免虚高）。
         self._debug(
             "%s task=%s 最终生成请求 kind=%s prompt=%s params=%s",
             self._log_prefix(task.runtime.get("source_event")),
@@ -852,13 +875,15 @@ class Imago(Star):
                         platform_name = ""
             provider_settings = {}
             try:
-                # 与主链 _decorate_llm_request 的数据源对齐：全局 provider_settings
-                # 优先（主链 config.provider_settings 即全局快照），回退会话命中的
-                # umo 级配置。只用 umo 级会在多配置文件场景下与主链解析到不同
-                # default_personality，导致配文人设错位。
-                global_ps = (self.context.get_config() or {}).get("provider_settings", {}) or {}
-                umo_ps = (self.context.get_config(umo=task.umo) or {}).get("provider_settings", {}) or {}
-                provider_settings = global_ps or umo_ps
+                # 与主链 _decorate_llm_request 对齐：主链
+                # cfg = config.provider_settings or get_config(umo).get("provider_settings")
+                # 两个分支都是「会话命中的 UMO 配置」（多配置文件按 umop 路由），
+                # 从不读全局默认配置。配文人设必须与主链同一数据源，否则多配置文件
+                # 场景下会解析成默认配置的人设，配文口吻与正常对话错位。
+                provider_settings = persona_provider_settings(
+                    self.context.get_config(umo=task.umo),
+                    self.context.get_config(),
+                )
             except Exception:
                 provider_settings = {}
             resolved_id, persona, _, _ = await manager.resolve_selected_persona(
@@ -923,12 +948,13 @@ class Imago(Star):
         )
         base = caption_system_text(persona_prompt, has_images)
         if cm_contexts:
-            # 与 ChatMemory 通用规则语义一致的轻量复述（不导入对方模块）。
+            # 上下文里会出现 ChatMemory 注入的结构化元数据标签：只提示模型
+            # 它们是语境元数据、不是对话内容，避免把标签当成人设或用户发言。
+            # 输出端清理不在此做（CM 装饰链职责，不耦合对方格式）。
             base += (
-                "\n\n历史上下文中的 <cm_*> 是 ChatMemory 注入的结构化元数据标签"
-                "（发言者/时间/回复关系等），仅供理解语境，不是对话内容；不得学习其"
-                "格式，也不得在输出中复现任何 cm_ 标签或其内容。最后一条 user 消息"
-                "才是本次请求。"
+                "\n\n历史上下文中出现的 <cm_*> 是 ChatMemory 注入的结构化元数据标签"
+                "（发言者/时间/回复关系等），仅供理解语境，不是对话内容。最后一条"
+                " user 消息才是本次请求。"
             )
         return base
 
@@ -1116,13 +1142,18 @@ class Imago(Star):
             if generation_success and cfg.llm_caption_pregen and pregen_task is not None:
                 # 出图成功：优先用并行预生成的“成功版”配文（通常已就绪）；
                 # 等待超时或失败则回退固定文案，不再二次同步生成。
-                try:
-                    remaining = cfg.generation_timeout - (time.monotonic() - task.created_at)
-                    timeout = min(45.0, max(5.0, remaining - 15))
-                    caption = await asyncio.wait_for(pregen_task, timeout=timeout)
-                except Exception as exc:
-                    self._debug("%s task=%s 预生成配文不可用，回退固定文案 type=%s", self._log_prefix(event), task.id[:8], type(exc).__name__)
+                remaining = cfg.generation_timeout - (time.monotonic() - task.created_at)
+                if remaining <= 20:
+                    # 预算不足：不等待预生成，直接回退固定文案，避免等待把任务
+                    # 拖出总预算（图片已生成却被判 TIMED_OUT 且不发送）。
                     caption = ""
+                else:
+                    timeout = min(45.0, max(5.0, remaining - 15))
+                    try:
+                        caption = await asyncio.wait_for(pregen_task, timeout=timeout)
+                    except Exception as exc:
+                        self._debug("%s task=%s 预生成配文不可用，回退固定文案 type=%s", self._log_prefix(event), task.id[:8], type(exc).__name__)
+                        caption = ""
             else:
                 # 失败路径：预生成结果无效，取消之；失败/部分通知仍同步生成。
                 if pregen_task is not None and not pregen_task.done():
@@ -1152,6 +1183,9 @@ class Imago(Star):
             chain,
             before_send=lambda: self.scheduler.set_stage(task, TaskStage.SENDING),
         )
+        # 主发送流程已结束（无论成败）：超时补发通知以此为准，避免平台实际
+        # 已收到主消息后又被终态通知重复打扰。
+        task.runtime["runner_send_completed"] = True
         task.runtime[f"{delivery_prefix}_success"] = send_outcome.success
         task.runtime[f"{delivery_prefix}_error"] = send_outcome.error
         task.runtime[f"{delivery_prefix}_side_effects_started"] = send_outcome.side_effects_started
@@ -1163,9 +1197,9 @@ class Imago(Star):
                 self._log_prefix(event),
                 task.id[:8],
                 generation_success,
-                delivery_kind,
-                send_outcome.error or "Unknown",
-            )
+                    delivery_kind,
+                    send_outcome.error or "Unknown",
+                )
         return SendOutcome(
             send_outcome.success,
             send_outcome.error,
@@ -1222,10 +1256,15 @@ class Imago(Star):
         )
 
     async def _finalize_task(self, task: DrawTask) -> None:
-        # 兜底清理：任务未走到配文等待分支（超时/取消等）时取消仍可能运行的预生成任务。
+        # 兜底清理：任务未走到配文等待分支（超时/取消等）时取消仍可能运行的预生成
+        # 任务并回收，避免取消状态残留到 session 关闭之后。
         pregen_task = task.runtime.get("caption_pregen_task")
         if pregen_task is not None and not pregen_task.done():
             pregen_task.cancel()
+            try:
+                await pregen_task
+            except (asyncio.CancelledError, Exception):
+                pass
 
         # 终态汇总日志：成功/取消走 info，无输出走 warning，失败/超时/投递失败走 error。
         elapsed = max(0, int(time.monotonic() - task.created_at))
@@ -1306,11 +1345,12 @@ class Imago(Star):
 
     @quota_group.command("help")
     async def quota_help(self, event: AstrMessageEvent):
-        yield event.plain_result(
+        text = (
             "/imago quota show：查看自己的额度\n"
             "/imago quota sign：每日签到领取额度\n"
             "/imago quota add/del/set <用户 ID> <整数>：管理员调整额度"
         )
+        yield event.plain_result(text)
 
     @quota_group.command("show")
     async def quota_show(self, event: AstrMessageEvent):
@@ -1337,9 +1377,8 @@ class Imago(Star):
             if not result.success:
                 yield event.plain_result(result.reason)
                 return
-            yield event.plain_result(
-                f"签到成功，获得 {result.reward} 点绘图额度；当前余额 {result.snapshot.quota}。"
-            )
+            text = f"签到成功，获得 {result.reward} 点绘图额度；当前余额 {result.snapshot.quota}。"
+            yield event.plain_result(text)
         except Exception as exc:
             yield event.plain_result(self._safe_creation_error(exc))
 
@@ -1361,17 +1400,20 @@ class Imago(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @quota_group.command("add")
     async def quota_add(self, event: AstrMessageEvent, target: str = "", amount=None):
-        yield event.plain_result(await self._quota_admin_adjust(event, "add", target, amount))
+        text = await self._quota_admin_adjust(event, "add", target, amount)
+        yield event.plain_result(text)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @quota_group.command("del")
     async def quota_del(self, event: AstrMessageEvent, target: str = "", amount=None):
-        yield event.plain_result(await self._quota_admin_adjust(event, "del", target, amount))
+        text = await self._quota_admin_adjust(event, "del", target, amount)
+        yield event.plain_result(text)
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @quota_group.command("set")
     async def quota_set(self, event: AstrMessageEvent, target: str = "", amount=None):
-        yield event.plain_result(await self._quota_admin_adjust(event, "set", target, amount))
+        text = await self._quota_admin_adjust(event, "set", target, amount)
+        yield event.plain_result(text)
 
     @imago_group.command("help")
     async def help_command(self, event: AstrMessageEvent):
@@ -1431,12 +1473,16 @@ class Imago(Star):
         if not tasks:
             yield event.plain_result("当前没有正在处理或刚刚结束的映相任务。")
             return
-        yield event.plain_result("当前映相任务：\n" + "\n".join(self._task_status_lines(tasks)) + "\n不提供准确完成时间。")
+        text = "当前映相任务：\n" + "\n".join(self._task_status_lines(tasks)) + "\n不提供准确完成时间。"
+        yield event.plain_result(text)
 
     @imago_group.command("draw")
     async def draw_command(self, event: AstrMessageEvent, prompt: GreedyStr):
-        try: await self._submit(event, prompt); yield event.plain_result(PENDING_DRAW)
-        except Exception as exc: yield event.plain_result(f"无法创建任务：{self._safe_creation_error(exc)}")
+        try:
+            await self._submit(event, prompt)
+            yield event.plain_result(PENDING_DRAW)
+        except Exception as exc:
+            yield event.plain_result(f"无法创建任务：{self._safe_creation_error(exc)}")
 
     @imago_group.command("photo")
     async def photo_command(self, event: AstrMessageEvent, action: GreedyStr):
@@ -1444,7 +1490,8 @@ class Imago(Star):
             resolved_persona = await self._resolve_persona(event)
             await self._submit(event, action, persona=True, resolved_persona=resolved_persona)
             yield event.plain_result(PENDING_PHOTO.format(persona=resolved_persona[0]))
-        except Exception as exc: yield event.plain_result(f"无法创建任务：{self._safe_creation_error(exc)}")
+        except Exception as exc:
+            yield event.plain_result(f"无法创建任务：{self._safe_creation_error(exc)}")
 
     @filter.command("画")
     async def draw_shortcut(self, event: AstrMessageEvent, prompt: GreedyStr):
@@ -1459,15 +1506,26 @@ class Imago(Star):
         try:
             persona_id, prompt = await self._resolve_persona(event); item = self.store.get_summary(persona_id, prompt)
             yield event.plain_result((item or {}).get("summary", "尚无可用外观摘要。"))
-        except Exception as exc: yield event.plain_result(redact(str(exc)))
+        except Exception as exc:
+            yield event.plain_result(self._safe_creation_error(exc))
 
     @imago_group.command("summary-rebuild")
     async def summary_rebuild(self, event: AstrMessageEvent):
-        persona_id, _ = await self._resolve_persona(event); yield event.plain_result(await self.rebuild_summary(persona_id))
+        try:
+            persona_id, _ = await self._resolve_persona(event)
+            summary = await self.rebuild_summary(persona_id)
+            yield event.plain_result(summary)
+        except Exception as exc:
+            yield event.plain_result(self._safe_creation_error(exc))
 
     @imago_group.command("summary-set")
     async def summary_set(self, event: AstrMessageEvent, summary: GreedyStr):
-        persona_id, prompt = await self._resolve_persona(event); self.store.set_summary(persona_id, prompt, summary, manual=True); yield event.plain_result("已设置手工外观摘要。")
+        try:
+            persona_id, prompt = await self._resolve_persona(event)
+            self.store.set_summary(persona_id, prompt, summary, manual=True)
+            yield event.plain_result("已设置手工外观摘要。")
+        except Exception as exc:
+            yield event.plain_result(self._safe_creation_error(exc))
 
     @imago_group.command("ref-upload")
     async def ref_upload(self, event: AstrMessageEvent):
@@ -1478,7 +1536,8 @@ class Imago(Star):
             if not images: raise ValueError("请在同一条消息中附带图片")
             for image in images: self.store.add_reference(persona_id, image.data, image.mime_type)
             yield event.plain_result(f"已上传 {len(images)} 张 Persona 参考图。")
-        except Exception as exc: yield event.plain_result(redact(str(exc)))
+        except Exception as exc:
+            yield event.plain_result(self._safe_creation_error(exc))
 
     @imago_group.command("provider-primary")
     async def provider_primary(self, event: AstrMessageEvent, provider_id: str):

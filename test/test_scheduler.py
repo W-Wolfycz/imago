@@ -207,6 +207,39 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         sample.assert_not_called()
         self.assertEqual(request.references, explicit)
         self.assertEqual(task.runtime["current_persona_reference_count"], 0)
+        # 关系声明按实际采样数量追加：2 张用户图、0 张人设图 → 只有基础声明，
+        # 不含"前 N 张/其余 M 张"的分角色段落。
+        self.assertIn(scheduler_module.REFERENCE_RELATION_SUFFIX, request.prompt)
+        self.assertNotIn("The first", request.prompt)
+
+    def test_relation_suffix_counts_sampled_persona_refs_not_pool(self):
+        explicit = [ImageInput(b"explicit-1", "image/png", "e1.png")]
+        persona = [
+            ImageInput(b"p1", "image/png", "p1.png"),
+            ImageInput(b"p2", "image/png", "p2.png"),
+            ImageInput(b"p3", "image/png", "p3.png"),
+        ]
+        provider = ProviderConfig(
+            "node", "custom_endpoint", "https://example.invalid", ("key",),
+            model="model", reference_image_limit=3,
+        )
+        task = DrawTask("task", "umo", GenerationRequest("x", references=explicit))
+        task.runtime["persona_references"] = persona
+        with patch.object(scheduler_module.random, "sample", return_value=persona[:2]):
+            request = TaskScheduler._request_for_attempt(task, provider)
+        self.assertEqual(len(request.references), 3)
+        # 采样后实际 1 张用户图 + 2 张人设图，而非全量池 3 张人设图。
+        self.assertIn("The first 1 attached image(s)", request.prompt)
+        self.assertIn("The remaining 2 image(s)", request.prompt)
+
+    def test_no_explicit_refs_keeps_prompt_clean(self):
+        task = DrawTask("task", "umo", GenerationRequest("plain"))
+        provider = ProviderConfig(
+            "node", "custom_endpoint", "https://example.invalid", ("key",),
+            model="model", reference_image_limit=3,
+        )
+        request = TaskScheduler._request_for_attempt(task, provider)
+        self.assertEqual(request.prompt, "plain")
 
     async def test_reference_prepare_runs_in_task_before_provider(self):
         prepare_started = asyncio.Event()

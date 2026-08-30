@@ -39,7 +39,8 @@ class OpenAIChatAdapter(ProviderAdapter):
                     continue
                 value = item.get("image_url", item) if isinstance(item, dict) else item
                 value = value.get("url", "") if isinstance(value, dict) else value
-                if isinstance(value, str): results.append(ImageResult(url=value))
+                if isinstance(value, str) and value:
+                    results.append(ImageResult(url=value))
             text = message.get("content", "")
             if isinstance(text, list):
                 for part in text:

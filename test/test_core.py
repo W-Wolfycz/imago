@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from imago.core.config import load_config
+from imago.core.config import load_config, persona_provider_settings
 from imago.core.errors import DuplicateImage, NoOutputError, ProviderError, UnsupportedResponse
 from imago.core.models import GenerationRequest, ImageInput, ProviderConfig, QuotaConfig, TaskState
 from imago.providers.dashscope import DashScopeMultimodalAdapter
@@ -28,6 +28,44 @@ class ConfigTests(unittest.TestCase):
         cfg = load_config({"task_config": {"generation_timeout": 1, "max_concurrent_tasks": 0}})
         self.assertEqual(cfg.generation_timeout, 30)
         self.assertEqual(cfg.max_concurrent_tasks, 1)
+
+    def test_persona_provider_settings_prefers_umo(self):
+        # 会话命中配置与默认配置的 default_personality 不同时，必须用会话命中
+        # 配置（与主链 _decorate_llm_request 一致），不得用默认配置覆盖。
+        umo = {"provider_settings": {"default_personality": "gpt_demo"}}
+        default = {"provider_settings": {"default_personality": "persona_demo"}}
+        self.assertEqual(
+            persona_provider_settings(umo, default),
+            {"default_personality": "gpt_demo"},
+        )
+
+    def test_persona_provider_settings_falls_back_to_default(self):
+        # 未取到会话命中配置时才回退默认配置。
+        self.assertEqual(
+            persona_provider_settings(None, {"provider_settings": {"default_personality": "persona_demo"}}),
+            {"default_personality": "persona_demo"},
+        )
+
+    def test_persona_provider_settings_empty_umo_keeps_empty(self):
+        # 会话命中配置存在但 provider_settings 为空时返回空 dict（主链语义：
+        # 不吞回全局默认，default_personality 缺失由 resolve 走 conversation
+        # persona 分支）。
+        self.assertEqual(
+            persona_provider_settings({"other": 1}, {"provider_settings": {"default_personality": "persona_demo"}}),
+            {},
+        )
+
+    def test_extra_params_reject_reserved_keys(self):
+        # 保留键必须报错拒绝，防止覆盖 n/model/size/prompt/messages 放大成本
+        # 或覆盖节点配置。
+        for key in ("n", "model", "size", "prompt", "count", "messages", "api_key", "timeout"):
+            with self.subTest(key=key):
+                with self.assertRaises(ValueError) as ctx:
+                    parse_extra_params(f"--{key} value")
+                self.assertIn(f"不允许的附加参数: {key}", str(ctx.exception))
+
+    def test_extra_params_accept_regular_keys(self):
+        self.assertEqual(parse_extra_params("--quality high --seed 7"), {"quality": "high", "seed": "7"})
 
     def test_optimizer_style_labels_are_normalized(self):
         expected = {

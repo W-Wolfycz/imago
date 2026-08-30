@@ -112,7 +112,8 @@ async def _resolve_checked_url(url: str, *, block_private: bool) -> tuple[str, d
         request_url = urlunparse(
             (parsed.scheme, netloc, parsed.path or "/", parsed.params, parsed.query, parsed.fragment)
         )
-        host_header = parsed.hostname if parsed.port is None else f"{parsed.hostname}:{parsed.port}"
+        host_name = f"[{parsed.hostname}]" if ":" in (parsed.hostname or "") else parsed.hostname
+        host_header = host_name if parsed.port is None else f"{host_name}:{parsed.port}"
         return request_url, {"Host": host_header}
     return url, None
 
@@ -214,12 +215,10 @@ async def materialize_result(session, result: ImageResult, directory: Path, *, m
         return path
     if result.data is not None:
         data, mime = result.data, result.mime_type
-    elif DATA_URL.match(result.url):
-        # 生成结果下载保持宽松：信任声明/头部 MIME，避免 Provider 返回非
-        # png/jpeg/webp/gif 魔数的合法图片（如 AVIF）被误拒。
-        image = await fetch_reference(session, result.url, max_bytes=max_bytes, block_private=block_private, verify_magic=False)
-        data, mime = image.data, image.mime_type
     else:
+        # 生成结果下载保持宽松：信任声明/头部 MIME，避免 Provider 返回非
+        # png/jpeg/webp/gif 魔数的合法图片（如 AVIF）被误拒。data: 与
+        # HTTP(S) URL 共用同一读取路径。
         image = await fetch_reference(session, result.url, max_bytes=max_bytes, block_private=block_private, verify_magic=False)
         data, mime = image.data, image.mime_type
     if not data:
