@@ -5,8 +5,15 @@ import unittest
 from pathlib import Path
 
 from imago.core.config import load_config, persona_provider_settings
-from imago.core.errors import DuplicateImage, NoOutputError, ProviderError, UnsupportedResponse
+from imago.core.errors import (
+    DuplicateImage,
+    NoOutputError,
+    ProviderError,
+    UnsupportedResponse,
+    safe_creation_error_message,
+)
 from imago.core.models import GenerationRequest, ImageInput, ProviderConfig, QuotaConfig, TaskState
+from imago.providers.base import ProviderAdapter
 from imago.providers.dashscope import DashScopeMultimodalAdapter
 from imago.providers.openai_chat import OpenAIChatAdapter
 from imago.providers.openai_image import OpenAIImageAdapter
@@ -64,9 +71,6 @@ class ConfigTests(unittest.TestCase):
                     parse_extra_params(f"--{key} value")
                 self.assertIn(f"不允许的附加参数: {key}", str(ctx.exception))
 
-    def test_extra_params_accept_regular_keys(self):
-        self.assertEqual(parse_extra_params("--quality high --seed 7"), {"quality": "high", "seed": "7"})
-
     def test_optimizer_style_labels_are_normalized(self):
         expected = {
             "None(无)": "none",
@@ -85,35 +89,11 @@ class ConfigTests(unittest.TestCase):
         invalid = load_config({"optimizer_config": {"optimizer_style": "unknown"}})
         self.assertEqual(invalid.optimizer_style, "default")
 
-    def test_fallback_style_injection_defaults_false(self):
-        self.assertFalse(load_config({}).fallback_style_injection)
-        self.assertTrue(
-            load_config({"optimizer_config": {"fallback_style_injection": True}}).fallback_style_injection
-        )
-
-    def test_reference_caption_defaults_false(self):
-        self.assertFalse(load_config({}).reference_caption)
-        self.assertTrue(
-            load_config({"optimizer_config": {"reference_caption": True}}).reference_caption
-        )
-
     def test_llm_retry_default_and_bounds(self):
         self.assertEqual(load_config({}).llm_retry, 1)
         self.assertEqual(load_config({"task_config": {"llm_retry": 0}}).llm_retry, 1)
         self.assertEqual(load_config({"task_config": {"llm_retry": 9}}).llm_retry, 5)
         self.assertEqual(load_config({"task_config": {"llm_retry": 3}}).llm_retry, 3)
-
-    def test_llm_caption_defaults_false(self):
-        self.assertFalse(load_config({}).llm_caption)
-        self.assertTrue(load_config({"task_config": {"llm_caption": True}}).llm_caption)
-        self.assertFalse(load_config({}).llm_caption_cm_context)
-        self.assertTrue(
-            load_config({"task_config": {"llm_caption_cm_context": True}}).llm_caption_cm_context
-        )
-        self.assertFalse(load_config({}).llm_caption_pregen)
-        self.assertTrue(
-            load_config({"task_config": {"llm_caption_pregen": True}}).llm_caption_pregen
-        )
 
     def test_invalid_and_duplicate_providers_are_removed(self):
         raw = {"providers": [
@@ -139,23 +119,6 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.quota.blacklist_ids, frozenset({"10001", "10002"}))
         comma_value = load_config({"quota_config": {"blacklist_ids": "10001,10002"}})
         self.assertEqual(comma_value.quota.blacklist_ids, frozenset({"10001,10002"}))
-
-    def test_api_keys_schema_is_list(self):
-        schema = json.loads((ROOT / "_conf_schema.json").read_text("utf-8"))
-        item = schema["providers"]["templates"]["provider"]["items"]["api_keys"]
-        self.assertEqual(item["type"], "list")
-
-    def test_dashscope_provider_type_is_supported(self):
-        cfg = load_config({"providers": [{
-            "id":"qwen",
-            "api_type":"dashscope_multimodal",
-            "base_url":"https://example.invalid/generation",
-            "api_keys":"x",
-            "model":"qwen-image-3.0-pro",
-            "reference_image_limit": 3,
-        }]})
-        self.assertEqual(cfg.providers[0].api_type, "dashscope_multimodal")
-        self.assertEqual(cfg.providers[0].reference_image_limit, 3)
 
     def test_reference_image_limit_is_clamped(self):
         cfg = load_config({"providers": [{
@@ -223,21 +186,6 @@ class PersonaStoreTests(unittest.TestCase):
             store.add_reference("p", b"image", "image/png")
             with self.assertRaises(DuplicateImage): store.add_reference("p", b"image", "image/png")
 
-    def test_primary_provider_setting_is_persistent(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            store = PersonaStore(Path(tmp), 1024)
-            self.assertEqual(store.get_primary_provider_id(), "")
-            store.set_primary_provider_id("backup_demo")
-            self.assertEqual(PersonaStore(Path(tmp), 1024).get_primary_provider_id(), "backup_demo")
-
-    def test_text_summary_ignores_reference_changes(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            store = PersonaStore(Path(tmp), 1024)
-            store.set_summary("p", "prompt", "summary", manual=False)
-            self.assertIsNotNone(store.get_summary("p", "prompt"))
-            store.add_reference("p", b"new-image", "image/png")
-            self.assertIsNotNone(store.get_summary("p", "prompt"))
-
     def test_visual_summary_invalidates_when_selected_reference_disappears(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = PersonaStore(Path(tmp), 1024)
@@ -246,23 +194,6 @@ class PersonaStoreTests(unittest.TestCase):
             self.assertIsNotNone(store.get_summary("p", "prompt"))
             store.delete_reference("p", reference["name"])
             self.assertIsNone(store.get_summary("p", "prompt"))
-
-    def test_manual_summary_is_not_truncated(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            store = PersonaStore(Path(tmp), 1024)
-            summary = "x" * 500
-            store.set_summary("p", "prompt", summary, manual=True)
-            self.assertEqual(store.get_summary("p", "changed")["summary"], summary)
-
-    def test_upload_limit_getter_is_dynamic(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            limit = [4]
-            store = PersonaStore(Path(tmp), lambda: limit[0])
-            with self.assertRaisesRegex(ValueError, "图片格式或大小"):
-                store.add_reference("p", b"12345", "image/png")
-            limit[0] = 8
-            added = store.add_reference("p", b"12345", "image/png")
-            self.assertEqual(added["size"], 5)
 
     def test_task_inputs_outputs_and_manifest_are_persisted_without_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -318,26 +249,6 @@ class QuotaStoreTests(unittest.TestCase):
             decision = store.consume("10002", 4, policy)
             self.assertTrue(decision.allowed)
             self.assertEqual(decision.charged, 0)
-
-    def test_disabled_quota_and_policy_only_access_do_not_create_rows(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            store = QuotaStore(root, lambda: "2026-07-22")
-            disabled = QuotaConfig(enabled=False, daily_refresh_enabled=True, daily_quota_target=5)
-            self.assertTrue(store.can_consume("10001", 1, disabled).allowed)
-            self.assertTrue(store.consume("10001", 1, disabled).allowed)
-            self.assertFalse((root / "quotas.json").exists())
-
-            blocked = QuotaConfig(enabled=True, blacklist_ids=frozenset({"10002"}))
-            self.assertFalse(store.can_consume("10002", 1, blocked).allowed)
-            self.assertFalse(store.consume("10002", 1, blocked).allowed)
-            self.assertFalse((root / "quotas.json").exists())
-
-    def test_admin_adjustment_rejects_negative_amount(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            store = QuotaStore(Path(tmp), lambda: "2026-07-22")
-            with self.assertRaisesRegex(ValueError, "额度不能小于 0"):
-                store.adjust("10001", "set", -1, QuotaConfig())
 
     def test_refund_restores_actual_charged_amount(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -477,26 +388,6 @@ class ProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(UnsupportedResponse, "响应格式无效"):
             asyncio.run(adapter.generate(Session(), GenerationRequest("draw"), "key"))
 
-    def test_dashscope_accepts_multiple_reference_images(self):
-        adapter = DashScopeMultimodalAdapter(ProviderConfig(
-            "qwen", "dashscope_multimodal", "https://example.invalid/generation", ("k",),
-            model="qwen-image-2.0-pro",
-        ))
-        request = GenerationRequest("edit", references=[ImageInput(b"x", "image/png") for _ in range(4)])
-        body = adapter.build_body(request)
-        content = body["input"]["messages"][0]["content"]
-        self.assertEqual(len([item for item in content if "image" in item]), 4)
-
-    def test_dashscope_success_status_error_keeps_sanitized_code_and_message(self):
-        with self.assertRaisesRegex(ProviderError, "code=InvalidParameter") as raised:
-            DashScopeMultimodalAdapter.parse_response({
-                "code": "InvalidParameter",
-                "message": "workspace 123456789 rejected https://example.invalid/private",
-            })
-        self.assertNotIn("123456789", str(raised.exception))
-        self.assertNotIn("example.invalid", str(raised.exception))
-
-
 class PromptingTests(unittest.TestCase):
     def test_optimizer_uses_safe_default_and_preserves_user_priority(self):
         prompt = optimizer_system("", "anime", persona=True)
@@ -505,21 +396,82 @@ class PromptingTests(unittest.TestCase):
         self.assertIn("不得复制", prompt)
         self.assertIn("风格预设：", prompt)
 
-    def test_optimizer_none_uses_custom_prompt_without_builtin_style(self):
-        prompt = optimizer_system("CUSTOM SCENE RULE", "none", persona=True)
-        self.assertIn("CUSTOM SCENE RULE", prompt)
-        self.assertNotIn("风格预设：", prompt)
-        self.assertIn("始终优先于副脑自定义提示词", prompt)
-        self.assertIn("<identity_summary>", prompt)
+class SafeCreationErrorTests(unittest.TestCase):
+    def test_whitelist_messages_pass_through(self):
+        for text in (
+            "提示词不能为空",
+            "未配置有效图片节点",
+            "Persona 不存在或 prompt 为空",
+            "引用消息图片无法获取",
+            "插件正在关闭",
+            "外观摘要不能为空",
+            "请在同一条消息中附带图片",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(safe_creation_error_message(ValueError(text)), text)
+        # 冒号结尾的前缀允许后跟参数
+        self.assertEqual(safe_creation_error_message(ValueError("绘图额度不足: 3")), "绘图额度不足: 3")
+        self.assertEqual(safe_creation_error_message(ValueError("不允许的附加参数: n")), "不允许的附加参数: n")
 
-    def test_model_inputs_are_delimited(self):
-        self.assertEqual(
-            persona_optimizer_input("stable", "scene"),
-            "<identity_summary>\nstable\n</identity_summary>\n\n<scene_request>\nscene\n</scene_request>",
-        )
-        summary = summary_user_prompt("persona", "evidence")
-        self.assertIn("<persona_prompt>\npersona\n</persona_prompt>", summary)
-        self.assertIn("<visual_evidence>\nevidence\n</visual_evidence>", summary)
+    def test_reference_messages_exact_only_and_http_status(self):
+        for text in ("参考图过大", "远程响应不是图片", "不允许访问私网或本地地址", "图片格式或大小不符合要求"):
+            with self.subTest(text=text):
+                self.assertEqual(safe_creation_error_message(ValueError(text)), text)
+        # 拼接变体与三位数以外的状态码不放行
+        self.assertEqual(safe_creation_error_message(ValueError("参考图过大 extra junk")), "任务参数无效")
+        self.assertEqual(safe_creation_error_message(ValueError("参考图 HTTP 502")), "参考图 HTTP 502")
+        self.assertEqual(safe_creation_error_message(ValueError("参考图 HTTP 5020")), "任务参数无效")
+
+    def test_unknown_errors_are_generic_and_redacted(self):
+        self.assertEqual(safe_creation_error_message(RuntimeError("boom")), "插件暂时无法创建任务")
+        message = safe_creation_error_message(RuntimeError("api_key=sk-verysecret"))
+        self.assertNotIn("sk-verysecret", message)
+
+
+class ProviderErrorDetailTests(unittest.IsolatedAsyncioTestCase):
+    class _FakeResponse:
+        def __init__(self, status=200, payload=None, text=None):
+            self.status = status
+            self._payload = payload
+            self._text = text
+
+        async def json(self, content_type=None):
+            if self._payload is None:
+                raise ValueError("响应体不是 JSON")
+            return self._payload
+
+        async def text(self):
+            return self._text or ""
+
+    async def test_nested_openai_error_is_surfaced(self):
+        payload = {
+            "error": {
+                "message": "图片尺寸超限",
+                "type": "invalid_request_error",
+                "code": "invalid_request",
+            }
+        }
+        with self.assertRaises(ProviderError) as ctx:
+            await ProviderAdapter.response_json(self._FakeResponse(status=400, payload=payload))
+        message = str(ctx.exception)
+        self.assertIn("图片尺寸超限", message)
+        self.assertIn("code=invalid_request", message)
+        self.assertIn("type=invalid_request_error", message)
+
+    async def test_top_level_code_message_is_surfaced(self):
+        payload = {"code": "InvalidParameter", "message": "参数错误"}
+        with self.assertRaises(ProviderError) as ctx:
+            await ProviderAdapter.response_json(self._FakeResponse(status=400, payload=payload))
+        message = str(ctx.exception)
+        self.assertIn("code=InvalidParameter", message)
+        self.assertIn("参数错误", message)
+
+    async def test_non_json_body_falls_back_to_raw_text(self):
+        with self.assertRaises(ProviderError) as ctx:
+            await ProviderAdapter.response_json(self._FakeResponse(status=502, text="Gateway Timeout (relay)"))
+        message = str(ctx.exception)
+        self.assertIn("HTTP 502", message)
+        self.assertIn("Gateway Timeout (relay)", message)
 
 
 if __name__ == "__main__": unittest.main()

@@ -38,6 +38,38 @@ class ProviderAdapter(ABC):
         return results
 
     @staticmethod
+    def _error_detail(payload: Any) -> str:
+        """从错误响应体提取可诊断摘要。
+
+        兼容三种常见形态：顶层字段（百炼 code/message）、OpenAI/Gemini 的嵌套
+        ``error`` 对象（message/type/code）、``error`` 为纯字符串的中转站。
+        全部经 redact_debug 脱敏并截断，避免把完整响应体打进日志。
+        """
+        from ..core.security import redact_debug
+
+        if not isinstance(payload, dict):
+            return ""
+        error = payload.get("error")
+        if isinstance(error, dict):
+            merged = dict(payload)
+            merged.update(error)
+            payload = merged
+        elif isinstance(error, str) and error.strip():
+            return f"message={redact_debug(error)}"
+        parts = []
+        for key, label in (
+            ("code", "code"),
+            ("message", "message"),
+            ("msg", "message"),
+            ("type", "type"),
+            ("err", "message"),
+        ):
+            value = payload.get(key)
+            if value is not None and str(value).strip():
+                parts.append(f"{label}={redact_debug(str(value))[:160]}")
+        return " ".join(parts)
+
+    @staticmethod
     async def response_json(response: Any) -> Any:
         if response.status >= 400:
             from ..core.errors import ProviderError
@@ -45,18 +77,18 @@ class ProviderAdapter(ABC):
             detail = ""
             try:
                 payload = await response.json(content_type=None)
-                if isinstance(payload, dict):
-                    code = str(payload.get("code", "")).strip()
-                    message = str(payload.get("message", "")).strip()
-                    parts = []
-                    if code:
-                        parts.append(f"code={redact_debug(code)}")
-                    if message:
-                        parts.append(f"message={redact_debug(message)}")
-                    detail = " " + " ".join(parts) if parts else ""
+                detail = ProviderAdapter._error_detail(payload)
             except Exception:
-                pass
-            raise ProviderError(f"HTTP {response.status}{detail}", status=response.status)
+                payload = None
+            if not detail:
+                # 非 JSON 或未知结构：截断原始文本兜底，保证日志仍可诊断。
+                try:
+                    raw = await response.text()
+                except Exception:
+                    raw = ""
+                if raw and str(raw).strip():
+                    detail = "body=" + redact_debug(str(raw).strip())[:160]
+            raise ProviderError(f"HTTP {response.status}{' ' + detail if detail else ''}", status=response.status)
         try:
             return await response.json(content_type=None)
         except Exception as exc:

@@ -17,6 +17,7 @@ except ImportError:  # 允许在不含 AstrBot 运行依赖的源码环境运行
 from ..core.errors import ConfigurationError, NoOutputError, ProviderError
 from ..core.models import DrawTask, ImageResult, TaskStage, TaskState
 from ..core.prompting import REFERENCE_RELATION_SUFFIX, reference_relation_suffix
+from ..core.security import redact_debug
 from ..providers import ADAPTERS
 
 
@@ -190,6 +191,8 @@ class TaskScheduler:
             task.state = TaskState.TIMED_OUT
             task.runtime.setdefault("generation_success", False)
             task.runtime.setdefault("usable_output_count", 0)
+            # 供失败配文透传原因（脱敏后转述给用户）。
+            task.runtime.setdefault("last_provider_error", "任务超时")
             # 超时时若主发送流程尚未完成（runner 未运行，或已运行但平台发送没
             # 走完且没有成功投递记录），补发一次超时通知：配文/发送把预算耗尽时
             # 用户不应静默收不到任何消息。runner 已完成主发送（_finish_task 已置
@@ -211,6 +214,8 @@ class TaskScheduler:
             raise
         except Exception as exc:
             task.errors.append(type(exc).__name__)
+            # 供失败配文透传原因：脱敏 + 截断，避免上游任意文本直接进 LLM 上下文。
+            task.runtime["last_provider_error"] = redact_debug(str(exc))[:200] or type(exc).__name__
             if task.runtime.get("generation_success"):
                 task.state = TaskState.DELIVERY_FAILED
             elif isinstance(exc, NoOutputError):

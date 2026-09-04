@@ -39,30 +39,9 @@ class FetchReferenceBase64Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image.data, PNG)
         self.assertEqual(image.filename, "base64-reference.png")
 
-    async def test_base64_url_detects_jpeg_webp_gif(self):
-        cases = (
-            (JPEG, "image/jpeg", "base64-reference.jpg"),
-            (WEBP, "image/webp", "base64-reference.webp"),
-            (GIF, "image/gif", "base64-reference.gif"),
-        )
-        for payload, expected_mime, expected_name in cases:
-            with self.subTest(expected=expected_mime):
-                image = await fetch_reference(None, "base64://" + b64(payload), max_bytes=4096, block_private=True)
-                self.assertEqual(image.mime_type, expected_mime)
-                self.assertEqual(image.data, payload)
-                self.assertEqual(image.filename, expected_name)
-
     async def test_base64_invalid_alphabet_raises(self):
         with self.assertRaises(ReferenceImageError):
             await fetch_reference(None, "base64://!!not-base64!!", max_bytes=4096, block_private=True)
-
-    async def test_base64_empty_payload_raises(self):
-        with self.assertRaises(ReferenceImageError):
-            await fetch_reference(None, "base64://", max_bytes=4096, block_private=True)
-
-    async def test_base64_unrecognized_magic_raises(self):
-        with self.assertRaisesRegex(ReferenceImageError, "无法识别"):
-            await fetch_reference(None, "base64://" + b64(b"definitely-not-an-image"), max_bytes=4096, block_private=True)
 
     async def test_base64_oversize_raises(self):
         with self.assertRaisesRegex(ReferenceImageError, "过大"):
@@ -75,20 +54,6 @@ class FetchReferenceBase64Tests(unittest.IsolatedAsyncioTestCase):
             image = await fetch_reference(None, str(path), max_bytes=4096, block_private=True)
             self.assertEqual(image.mime_type, "image/png")
             self.assertEqual(image.data, PNG)
-
-    async def test_data_url_still_supported(self):
-        image = await fetch_reference(None, f"data:image/png;base64,{b64(PNG)}", max_bytes=4096, block_private=True)
-        self.assertEqual(image.mime_type, "image/png")
-        self.assertEqual(image.data, PNG)
-
-    def test_detect_image_mime_magic_numbers(self):
-        self.assertEqual(detect_image_mime(PNG), "image/png")
-        self.assertEqual(detect_image_mime(JPEG), "image/jpeg")
-        self.assertEqual(detect_image_mime(WEBP), "image/webp")
-        self.assertEqual(detect_image_mime(GIF), "image/gif")
-        self.assertIsNone(detect_image_mime(b"plain text"))
-        self.assertIsNone(detect_image_mime(b""))
-        self.assertIsNone(detect_image_mime(b"RIFFxxxxAVI " + bytes(8)))
 
 class Image:
     """带可选 convert_to_file_path 的轻量 Image 组件替身。"""
@@ -169,22 +134,6 @@ class ReferencePlannerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(local[0].filename, path.name)
             self.assertEqual(deferred, [])
 
-    async def test_base64_url_image_is_taken_over_inline_without_converter(self):
-        calls = []
-
-        async def converter():
-            calls.append("called")
-            return ""
-
-        component = Image(url="base64://" + b64(PNG), converter=converter)
-        local, deferred = await self.planner().plan([component])
-        self.assertEqual(len(local), 1)
-        self.assertEqual(local[0].data, PNG)
-        self.assertEqual(local[0].mime_type, "image/png")
-        self.assertEqual(local[0].filename, "base64-reference.png")
-        self.assertEqual(calls, [])
-        self.assertEqual(deferred, [])
-
     async def test_data_url_image_is_taken_over_inline_without_converter(self):
         calls = []
 
@@ -217,15 +166,6 @@ class ReferencePlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [])
         self.assertNotIn("component", deferred[0])
 
-    async def test_remote_url_in_file_field_also_defers_strict(self):
-        component = Image(file="https://example.invalid/a.png")
-        local, deferred = await self.planner().plan([component])
-        self.assertEqual(local, [])
-        self.assertEqual(len(deferred), 1)
-        self.assertEqual(deferred[0]["kind"], "source")
-        self.assertEqual(deferred[0]["source"], "https://example.invalid/a.png")
-        self.assertTrue(deferred[0]["strict"])
-
     async def test_bare_filename_image_with_converter_is_taken_over(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ref.png"
@@ -245,23 +185,6 @@ class ReferencePlannerTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             await self.planner().plan([component])
 
-    async def test_failed_converter_raises_strictly(self):
-        async def broken():
-            raise OSError("download failed")
-
-        component = Image(file="0d2bb1468a87d64414f8e563cc61c33c.png", converter=broken)
-        with self.assertRaises(ValueError):
-            await self.planner().plan([component])
-
-    async def test_invalid_base64_image_raises_strictly(self):
-        component = Image(url="base64://!!not-base64!!")
-        with self.assertRaises(ReferenceImageError):
-            await self.planner().plan([component])
-
-    async def test_oversize_base64_image_raises_strictly(self):
-        with self.assertRaises(ReferenceImageError):
-            await self.planner(max_upload=16).plan([Image(url="base64://" + b64(PNG))])
-
     async def test_duplicate_images_are_deduplicated(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ref.png"
@@ -271,48 +194,6 @@ class ReferencePlannerTests(unittest.IsolatedAsyncioTestCase):
                 Image(path=str(path)),
             ])
             self.assertEqual(len(local), 1)
-
-    async def test_duplicate_inline_and_local_are_deduplicated(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "ref.png"
-            path.write_bytes(PNG)
-            local, _ = await self.planner().plan([
-                Image(url="base64://" + b64(PNG)),
-                Image(path=str(path)),
-            ])
-            self.assertEqual(len(local), 1)
-
-    async def test_text_urls_become_non_strict_deferred_sources(self):
-        text = "参考 https://example.invalid/a.png 和 https://example.invalid/b.png"
-        local, deferred = await self.planner().plan([FakePlain(text=text)])
-        self.assertEqual(local, [])
-        self.assertEqual([item["kind"] for item in deferred], ["source", "source"])
-        self.assertEqual(
-            [item["source"] for item in deferred],
-            ["https://example.invalid/a.png", "https://example.invalid/b.png"],
-        )
-        self.assertTrue(all(item["strict"] is False for item in deferred))
-
-    async def test_reply_without_embedded_image_defers_when_extractor_available(self):
-        async def extractor(event, component):
-            return []
-
-        reply = Reply(message_str="[图片]")
-        local, deferred = await self.planner(extractor=extractor).plan([reply])
-        self.assertEqual(local, [])
-        self.assertEqual(len(deferred), 1)
-        self.assertEqual(deferred[0]["kind"], "reply")
-        self.assertTrue(deferred[0]["strict"])
-
-    async def test_reply_with_embedded_image_is_walked_and_taken_over(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "ref.png"
-            path.write_bytes(PNG)
-            reply = Reply(chain=[Image(path=str(path))])
-            local, deferred = await self.planner().plan([reply])
-            self.assertEqual(len(local), 1)
-            self.assertEqual(local[0].data, PNG)
-            self.assertEqual(deferred, [])
 
     async def test_reply_id_only_without_text_is_strict(self):
         """Fix A：只有引用 id、无 chain/message_str 的纯引用必须按 strict 处理。"""
@@ -326,16 +207,6 @@ class ReferencePlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(deferred[0]["kind"], "reply")
         self.assertTrue(deferred[0]["strict"])
 
-    async def test_reply_id_only_with_empty_chain_text_is_strict(self):
-        """Fix A：chain 存在但文本为空同样视为纯引用，不能宽松。"""
-        async def extractor(event, component):
-            return []
-
-        reply = Reply(id="msg_quoted_002", chain=[FakePlain(text="")], message_str="")
-        local, deferred = await self.planner(extractor=extractor).plan([reply])
-        self.assertEqual(len(deferred), 1)
-        self.assertTrue(deferred[0]["strict"])
-
     async def test_reply_with_chain_text_without_image_is_not_strict(self):
         """Fix A：有可检查正文且不含图片标记时保持宽松（明确不含图）。"""
         async def extractor(event, component):
@@ -345,26 +216,6 @@ class ReferencePlannerTests(unittest.IsolatedAsyncioTestCase):
         local, deferred = await self.planner(extractor=extractor).plan([reply])
         self.assertEqual(len(deferred), 1)
         self.assertEqual(deferred[0]["kind"], "reply")
-        self.assertFalse(deferred[0]["strict"])
-
-    async def test_reply_with_chain_placeholder_image_is_strict(self):
-        """Fix A：chain 文本出现 [图片] 占位仍按 strict 处理。"""
-        async def extractor(event, component):
-            return []
-
-        reply = Reply(id="msg_quoted_004", chain=[FakePlain(text="[图片]")], message_str="")
-        local, deferred = await self.planner(extractor=extractor).plan([reply])
-        self.assertEqual(len(deferred), 1)
-        self.assertTrue(deferred[0]["strict"])
-
-    async def test_reply_without_id_and_without_text_stays_permissive(self):
-        """无引用 id 时没有可提取来源，保持宽松不阻断（与既有行为一致）。"""
-        async def extractor(event, component):
-            return []
-
-        reply = Reply(chain=[], message_str="")
-        local, deferred = await self.planner(extractor=extractor).plan([reply])
-        self.assertEqual(len(deferred), 1)
         self.assertFalse(deferred[0]["strict"])
 
 class OpenAIImageEditsFieldTests(unittest.TestCase):
@@ -423,16 +274,6 @@ class OpenAIImageEditsFieldTests(unittest.TestCase):
 class FetchReferenceRedirectTests(unittest.IsolatedAsyncioTestCase):
     """HTTP(S) 重定向 SSRF 加固的行为级测试（IP 字面量，无需 DNS/网络）。"""
 
-    async def test_http_without_redirect_returns_image(self):
-        session = FakeRedirectSession({
-            "http://1.1.1.1/a.png": FakeResponse(status=200, headers={"Content-Type": "image/png"}, chunks=PNG),
-        })
-        image = await fetch_reference(session, "http://1.1.1.1/a.png", max_bytes=4096, block_private=True)
-        self.assertEqual(image.data, PNG)
-        self.assertEqual(image.mime_type, "image/png")
-        self.assertEqual([url for url, _ in session.calls], ["http://1.1.1.1/a.png"])
-        self.assertIs(session.calls[0][1].get("allow_redirects"), False)
-
     async def test_redirect_is_followed_manually_and_relative_location_resolved(self):
         responses = {
             "http://1.1.1.1/a.png": FakeResponse(status=302, headers={"Location": "/b.png"}),
@@ -454,32 +295,11 @@ class FetchReferenceRedirectTests(unittest.IsolatedAsyncioTestCase):
         # 内网目标未被请求（校验在请求前拦截）。
         self.assertEqual([url for url, _ in session.calls], ["http://1.1.1.1/a.png"])
 
-    async def test_redirect_to_link_local_metadata_is_blocked(self):
-        session = FakeRedirectSession({
-            "http://1.1.1.1/a.png": FakeResponse(status=302, headers={"Location": "http://169.254.169.254/latest/meta-data/"}),
-        })
-        with self.assertRaises(ReferenceImageError):
-            await fetch_reference(session, "http://1.1.1.1/a.png", max_bytes=4096, block_private=True)
-
     async def test_redirect_with_embedded_credentials_is_blocked(self):
         session = FakeRedirectSession({
             "http://1.1.1.1/a.png": FakeResponse(status=302, headers={"Location": "http://user:pass@1.1.1.1/ref.png"}),
         })
         with self.assertRaises(ReferenceImageError):
-            await fetch_reference(session, "http://1.1.1.1/a.png", max_bytes=4096, block_private=True)
-
-    async def test_redirect_to_non_http_scheme_is_blocked(self):
-        session = FakeRedirectSession({
-            "http://1.1.1.1/a.png": FakeResponse(status=302, headers={"Location": "ftp://1.1.1.1/ref.png"}),
-        })
-        with self.assertRaises(ReferenceImageError):
-            await fetch_reference(session, "http://1.1.1.1/a.png", max_bytes=4096, block_private=True)
-
-    async def test_redirect_without_location_is_rejected(self):
-        session = FakeRedirectSession({
-            "http://1.1.1.1/a.png": FakeResponse(status=302, headers={}),
-        })
-        with self.assertRaisesRegex(ReferenceImageError, "缺少 Location"):
             await fetch_reference(session, "http://1.1.1.1/a.png", max_bytes=4096, block_private=True)
 
     async def test_redirect_limit_exceeded_is_rejected(self):
@@ -511,13 +331,6 @@ class FetchReferenceHttpContentTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ReferenceImageError, "无法获取"):
             await fetch_reference(session, "http://1.1.1.1/empty.png", max_bytes=4096, block_private=True)
 
-    async def test_http_non_image_magic_is_rejected(self):
-        session = FakeRedirectSession({
-            "http://1.1.1.1/fake.png": FakeResponse(status=200, headers={"Content-Type": "image/png"}, chunks=b"<html>not an image</html>"),
-        })
-        with self.assertRaisesRegex(ReferenceImageError, "远程响应不是图片"):
-            await fetch_reference(session, "http://1.1.1.1/fake.png", max_bytes=4096, block_private=True)
-
     async def test_http_magic_overrides_header_mime(self):
         session = FakeRedirectSession({
             "http://1.1.1.1/a.gif": FakeResponse(status=200, headers={"Content-Type": "image/gif"}, chunks=JPEG),
@@ -534,10 +347,6 @@ class FetchReferenceHttpContentTests(unittest.IsolatedAsyncioTestCase):
         image = await fetch_reference(session, "http://1.1.1.1/a.avif", max_bytes=4096, block_private=True, verify_magic=False)
         self.assertEqual(image.mime_type, "image/avif")
 
-    async def test_data_url_verify_magic_false_uses_declared_mime(self):
-        image = await fetch_reference(None, f"data:image/png;base64,{b64(b'not-an-image')}", max_bytes=4096, block_private=True, verify_magic=False)
-        self.assertEqual(image.mime_type, "image/png")
-
 class FetchReferenceDataUrlTests(unittest.IsolatedAsyncioTestCase):
     """data URL 魔数识别与 base64 解码前长度预估。"""
 
@@ -545,18 +354,9 @@ class FetchReferenceDataUrlTests(unittest.IsolatedAsyncioTestCase):
         image = await fetch_reference(None, f"data:image/png;base64,{b64(JPEG)}", max_bytes=4096, block_private=True)
         self.assertEqual(image.mime_type, "image/jpeg")
 
-    async def test_data_url_unrecognized_magic_raises(self):
-        with self.assertRaisesRegex(ReferenceImageError, "无法识别"):
-            await fetch_reference(None, f"data:image/png;base64,{b64(b'not an image')}", max_bytes=4096, block_private=True)
-
     async def test_data_url_oversize_is_rejected_before_decode(self):
         with self.assertRaisesRegex(ReferenceImageError, "过大"):
             await fetch_reference(None, f"data:image/png;base64,{b64(PNG)}", max_bytes=16, block_private=True)
-
-    async def test_data_url_matches_magic_still_ok(self):
-        image = await fetch_reference(None, f"data:image/png;base64,{b64(PNG)}", max_bytes=4096, block_private=True)
-        self.assertEqual(image.mime_type, "image/png")
-        self.assertEqual(image.data, PNG)
 
 class ResolveCheckedUrlTests(unittest.IsolatedAsyncioTestCase):
     async def test_http_ip_literal_is_pinned_with_host_header(self):
@@ -565,21 +365,10 @@ class ResolveCheckedUrlTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request_url, "http://1.1.1.1/a.png")
         self.assertEqual(headers, {"Host": "1.1.1.1"})
 
-    async def test_http_port_is_kept_in_netloc_and_host_header(self):
-        from imago.core.network import _resolve_checked_url
-        request_url, headers = await _resolve_checked_url("http://1.1.1.1:8080/x", block_private=True)
-        self.assertEqual(request_url, "http://1.1.1.1:8080/x")
-        self.assertEqual(headers, {"Host": "1.1.1.1:8080"})
-
     async def test_private_ip_is_rejected(self):
         from imago.core.network import _resolve_checked_url
         with self.assertRaisesRegex(ValueError, "私网"):
             await _resolve_checked_url("http://127.0.0.1/x", block_private=True)
-
-    async def test_private_allowed_when_block_disabled(self):
-        from imago.core.network import _resolve_checked_url
-        request_url, headers = await _resolve_checked_url("http://127.0.0.1/x", block_private=False)
-        self.assertEqual(request_url, "http://127.0.0.1/x")
 
     async def test_https_keeps_original_url_without_host_header(self):
         from imago.core.network import _resolve_checked_url

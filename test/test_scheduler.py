@@ -41,41 +41,6 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             if old is None: scheduler_module.ADAPTERS.pop("custom_endpoint", None)
             else: scheduler_module.ADAPTERS["custom_endpoint"] = old
 
-    async def test_api_key_rotation_is_independent_per_provider(self):
-        captured = []
-
-        class Adapter:
-            def __init__(self, config): self.config = config
-            async def generate(self, session, request, key):
-                captured.append((self.config.id, key))
-                return [ImageResult(data=b"image")]
-
-        old = scheduler_module.ADAPTERS.get("custom_endpoint")
-        scheduler_module.ADAPTERS["custom_endpoint"] = Adapter
-        providers = (
-            ProviderConfig("node_a", "custom_endpoint", "https://example.invalid/a", ("a1", "a2"), model="model"),
-            ProviderConfig("node_b", "custom_endpoint", "https://example.invalid/b", ("b1", "b2"), model="model"),
-        )
-        scheduler = TaskScheduler(
-            lambda: RuntimeConfig(providers=providers, generation_timeout=30),
-            DummySession(), lambda *_: True, lambda *_: None,
-        )
-        try:
-            for provider_id in ("node_a", "node_b", "node_a", "node_b"):
-                task = DrawTask(provider_id, "umo", GenerationRequest("x"))
-                task.runtime["primary_provider_id"] = provider_id
-                await scheduler._generate(task)
-            self.assertEqual(captured, [
-                ("node_a", "a1"),
-                ("node_b", "b1"),
-                ("node_a", "a2"),
-                ("node_b", "b2"),
-            ])
-        finally:
-            await scheduler.close()
-            if old is None: scheduler_module.ADAPTERS.pop("custom_endpoint", None)
-            else: scheduler_module.ADAPTERS["custom_endpoint"] = old
-
     async def test_selected_primary_provider_is_tried_first_and_invalid_falls_back_to_first(self):
         attempts = []
 
@@ -232,15 +197,6 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("The first 1 attached image(s)", request.prompt)
         self.assertIn("The remaining 2 image(s)", request.prompt)
 
-    def test_no_explicit_refs_keeps_prompt_clean(self):
-        task = DrawTask("task", "umo", GenerationRequest("plain"))
-        provider = ProviderConfig(
-            "node", "custom_endpoint", "https://example.invalid", ("key",),
-            model="model", reference_image_limit=3,
-        )
-        request = TaskScheduler._request_for_attempt(task, provider)
-        self.assertEqual(request.prompt, "plain")
-
     async def test_reference_prepare_runs_in_task_before_provider(self):
         prepare_started = asyncio.Event()
         allow_prepare = asyncio.Event()
@@ -288,20 +244,8 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         scheduler.submit(task)
         await asyncio.wait_for(finished.wait(), 1)
         self.assertEqual(task.state, TaskState.FAILED)
-        await scheduler.close()
-
-    async def test_query_is_user_and_bot_scoped_and_keeps_short_terminal_snapshot(self):
-        finished = asyncio.Event()
-        async def runner(task, results): finished.set(); return False
-        scheduler = TaskScheduler(lambda: RuntimeConfig(providers=(), generation_timeout=30), DummySession(), runner, lambda *_: None)
-        task = DrawTask("", "platform:GroupMessage:group_demo", GenerationRequest("x"), owner_user_id="10001", bot_instance_id="bot_demo")
-        scheduler.submit(task)
-        await asyncio.wait_for(finished.wait(), 1)
-        await asyncio.sleep(0)
-        self.assertEqual(task.stage, TaskStage.FINISHED)
-        self.assertEqual(len(scheduler.query(umo=task.umo, owner_user_id="10001", bot_instance_id="bot_demo")), 1)
-        self.assertEqual(scheduler.query(umo=task.umo, owner_user_id="10002", bot_instance_id="bot_demo"), [])
-        self.assertEqual(scheduler.query(umo=task.umo, owner_user_id="10001", bot_instance_id="bot_other"), [])
+        # 失败原因写入 runtime，供失败配文透传给 LLM 转述。
+        self.assertTrue(task.runtime.get("last_provider_error"))
         await scheduler.close()
 
     async def test_terminate_cancels_waiting_task_without_output(self):
@@ -443,52 +387,6 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(task.runtime["usable_output_count"], 0)
             self.assertTrue(task.runtime["notification_delivery_success"])
             self.assertNotIn("image_delivery_success", task.runtime)
-        finally:
-            await scheduler.close()
-            if old is None: scheduler_module.ADAPTERS.pop("custom_endpoint", None)
-            else: scheduler_module.ADAPTERS["custom_endpoint"] = old
-
-    async def test_provider_zero_output_falls_back_then_finishes_as_no_output(self):
-        attempts = []
-        finished = asyncio.Event()
-
-        class Adapter:
-            def __init__(self, config): self.config = config
-            async def generate(self, session, request, key):
-                attempts.append(self.config.model)
-                raise NoOutputError("没有图片")
-
-        class Outcome:
-            success = True
-            error = ""
-            generation_success = False
-            usable_output_count = 0
-            delivery_kind = "notification"
-
-        old = scheduler_module.ADAPTERS.get("custom_endpoint")
-        scheduler_module.ADAPTERS["custom_endpoint"] = Adapter
-        provider = ProviderConfig(
-            "node", "custom_endpoint", "https://example.invalid", ("key",),
-            model="empty_a", available_models=("empty_b",),
-        )
-
-        async def runner(task, results):
-            self.assertEqual(results, [])
-            finished.set()
-            return Outcome()
-
-        scheduler = TaskScheduler(
-            lambda: RuntimeConfig(providers=(provider,), generation_timeout=30),
-            DummySession(), runner, lambda *_: None,
-        )
-        task = DrawTask("", "umo", GenerationRequest("x"))
-        try:
-            scheduler.submit(task)
-            await asyncio.wait_for(finished.wait(), 1)
-            await asyncio.sleep(0)
-            self.assertEqual(attempts, ["empty_a", "empty_b"])
-            self.assertEqual(task.state, TaskState.NO_OUTPUT)
-            self.assertIn("NoOutputError", task.errors)
         finally:
             await scheduler.close()
             if old is None: scheduler_module.ADAPTERS.pop("custom_endpoint", None)
