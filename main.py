@@ -56,7 +56,7 @@ PENDING_PHOTO = "📸 正在为当前人设「{persona}」拍摄，请稍后…�
 FOREGROUND_REFERENCE_TIMEOUT = 30.0
 
 
-@register("imago", "Wolfycz", "异步图片生成与 Persona 素材管理", "1.1.2")
+@register("imago", "Wolfycz", "异步图片生成与 Persona 素材管理", "1.1.3")
 class Imago(Star):
     _STAGE_LABELS = {
         TaskStage.QUEUED: "排队中",
@@ -1499,7 +1499,7 @@ class Imago(Star):
     async def generate_image(self, event: AstrMessageEvent, prompt: str, count: int = 1, aspect_ratio: str = "", size: str = "", extra_params: str = ""):
         """
         当用户当前消息明确提出新生成、绘制、改图或重绘一张图片，且当前会话 Persona 本人不需要出现在画面中时，必须调用本工具。
-        不要只用文字描述成图、假装已经画好，或在未成功创建任务时声称稍后会发图。历史中已经创建过、正在处理的画面不要重复调用本工具。
+        不要只用文字描述成图、假装已经画好，或在未成功创建任务时声称稍后会发图。历史中已经创建过、正在处理的画面绝对不要重复调用本工具：重复调用会再次扣费并生成重复图片，工具只负责创建任务，图片会由插件后台完成后另行发送。
 
         适用于场景、物品、海报、非当前会话 Persona 角色或其他普通图片。
         当前会话 Persona 本人需要出镜时应改用 generate_persona_image。
@@ -1519,9 +1519,10 @@ class Imago(Star):
         """
         try:
             await self._submit(event, prompt, count=count, aspect_ratio=aspect_ratio, size=size, extra_params=extra_params)
-            return ("后台绘图任务已创建，但图片目前尚未生成或确认送达；插件会在处理完成后另行发送。"
-                    "不要承诺准确完成时间。请以当前 Persona 的语气简短回复用户，"
-                    "自然表达“收到灵感，正在绘制，请稍等一下”。")
+            return ("后台绘图任务已创建并在处理中，图片完成后插件会另行发送，"
+                    "你无需等待结果。同一画面绝对不要再次调用本工具：重复调用会再次扣费并生成重复图片。"
+                    "请立即以当前 Persona 的语气简短回复用户，自然表达“收到灵感，正在绘制，请稍等一下”，"
+                    "不要声称已经画好，也不要在本轮继续调用该工具。")
         except Exception as exc:
             return f"后台绘图任务未能创建。可告知用户的原因：{self._safe_creation_error(exc)}。请以当前 Persona 的语气简短说明失败，不要虚构任务已开始或图片已生成。"
 
@@ -1529,7 +1530,7 @@ class Imago(Star):
     async def generate_persona_image(self, event: AstrMessageEvent, action: str, count: int = 1, aspect_ratio: str = "", size: str = "", extra_params: str = "", camera: str = ""):
         """
         当用户当前消息明确提出让当前会话 Persona 自拍、拍照、发一张本人照片、以图片展示动作或场景、合影，或以其他方式本人出镜时，必须调用本工具。
-        不要只用文字扮演拍照、假装已经拍好，或在未成功创建任务时声称稍后会发照片。历史中已经创建过、正在处理的画面不要重复调用本工具。
+        不要只用文字扮演拍照、假装已经拍好，或在未成功创建任务时声称稍后会发照片。历史中已经创建过、正在处理的画面绝对不要重复调用本工具：重复调用会再次扣费并生成重复图片，工具只负责创建任务，图片会由插件后台完成后另行发送。
 
         适用于自拍、他拍、第三人称场景照、全身照、特写、合影或其他需要当前 Persona 出镜的画面。
         当前会话 Persona 本人不需要出镜的普通绘图应改用 generate_image。
@@ -1552,9 +1553,10 @@ class Imago(Star):
         action = merge_camera_request(action, camera)
         try:
             await self._submit(event, action, persona=True, count=count, aspect_ratio=aspect_ratio, size=size, extra_params=extra_params)
-            return ("后台 Persona 图片任务已创建，但图片目前尚未生成或确认送达；插件会在处理完成后另行发送。"
-                    "不要承诺准确完成时间。请以当前 Persona 的语气简短回复用户，"
-                    "自然表达“正在拍摄，请稍后……”；不要声称已经拍好。")
+            return ("后台 Persona 图片任务已创建并在处理中，图片完成后插件会另行发送，"
+                    "你无需等待结果。同一画面绝对不要再次调用本工具：重复调用会再次扣费并生成重复图片。"
+                    "请立即以当前 Persona 的语气简短回复用户，自然表达“正在拍摄，请稍后……”，"
+                    "不要声称已经拍好，也不要在本轮继续调用该工具。")
         except Exception as exc:
             return f"后台 Persona 图片任务未能创建。可告知用户的原因：{self._safe_creation_error(exc)}。请以当前 Persona 的语气简短说明失败，不要虚构任务已开始、正在拍摄或图片已经生成。"
 
