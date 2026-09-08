@@ -31,6 +31,7 @@ from .models import ImageInput
 from .network import fetch_reference
 
 _HTTP_URL = re.compile(r"https?://[^\s<>\]\[()\"']+")
+_IMAGE_PLACEHOLDERS = ("[图片]", "[Image]", "[image]")
 _SUFFIX_MIME = {
     ".png": "image/png",
     ".jpg": "image/jpeg",
@@ -38,6 +39,23 @@ _SUFFIX_MIME = {
     ".webp": "image/webp",
     ".gif": "image/gif",
 }
+
+
+def quoted_reply_missing_images(
+    *, strict: bool, image_sources, quoted_text: str = ""
+) -> bool:
+    """严格引用回复是否应判定为“引用消息图片无法获取”。
+
+    严格模式只在**完全取不到引用内容**时才算失败：取到正文（且正文不是图片
+    占位符）说明引用消息确实存在、只是不含图，此时按纯文生图继续，不应把整轮
+    绘图请求打断（用户回复一条文字消息后要求画图是常见用法）。
+    """
+    if not strict or image_sources:
+        return False
+    text = str(quoted_text or "").strip()
+    if text and not any(marker in text for marker in _IMAGE_PLACEHOLDERS):
+        return False
+    return True
 
 
 class ReferencePlanner:

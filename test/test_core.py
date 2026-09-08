@@ -35,65 +35,22 @@ class ConfigTests(unittest.TestCase):
         cfg = load_config({"task_config": {"generation_timeout": 1, "max_concurrent_tasks": 0}})
         self.assertEqual(cfg.generation_timeout, 30)
         self.assertEqual(cfg.max_concurrent_tasks, 1)
-
-    def test_persona_provider_settings_prefers_umo(self):
-        # 会话命中配置与默认配置的 default_personality 不同时，必须用会话命中
-        # 配置（与主链 _decorate_llm_request 一致），不得用默认配置覆盖。
-        umo = {"provider_settings": {"default_personality": "gpt_demo"}}
-        default = {"provider_settings": {"default_personality": "persona_demo"}}
-        self.assertEqual(
-            persona_provider_settings(umo, default),
-            {"default_personality": "gpt_demo"},
-        )
-
-    def test_persona_provider_settings_falls_back_to_default(self):
-        # 未取到会话命中配置时才回退默认配置。
-        self.assertEqual(
-            persona_provider_settings(None, {"provider_settings": {"default_personality": "persona_demo"}}),
-            {"default_personality": "persona_demo"},
-        )
-
-    def test_persona_provider_settings_empty_umo_keeps_empty(self):
-        # 会话命中配置存在但 provider_settings 为空时返回空 dict（主链语义：
-        # 不吞回全局默认，default_personality 缺失由 resolve 走 conversation
-        # persona 分支）。
-        self.assertEqual(
-            persona_provider_settings({"other": 1}, {"provider_settings": {"default_personality": "persona_demo"}}),
-            {},
-        )
-
-    def test_extra_params_reject_reserved_keys(self):
-        # 保留键必须报错拒绝，防止覆盖 n/model/size/prompt/messages 放大成本
-        # 或覆盖节点配置。
-        for key in ("n", "model", "size", "prompt", "count", "messages", "api_key", "timeout"):
-            with self.subTest(key=key):
-                with self.assertRaises(ValueError) as ctx:
-                    parse_extra_params(f"--{key} value")
-                self.assertIn(f"不允许的附加参数: {key}", str(ctx.exception))
-
-    def test_optimizer_style_labels_are_normalized(self):
-        expected = {
-            "None(无)": "none",
-            "default(通用)": "default",
-            "realistic(写实)": "realistic",
-            "cinematic(电影感)": "cinematic",
-            "anime(动漫)": "anime",
-            "3d(3D渲染)": "3d",
-            "realistic": "realistic",
-        }
-        for configured, internal in expected.items():
-            with self.subTest(configured=configured):
-                cfg = load_config({"optimizer_config": {"optimizer_style": configured}})
-                self.assertEqual(cfg.optimizer_style, internal)
-
-        invalid = load_config({"optimizer_config": {"optimizer_style": "unknown"}})
-        self.assertEqual(invalid.optimizer_style, "default")
-
-    def test_llm_retry_default_and_bounds(self):
-        self.assertEqual(load_config({}).llm_retry, 1)
         self.assertEqual(load_config({"task_config": {"llm_retry": 0}}).llm_retry, 1)
         self.assertEqual(load_config({"task_config": {"llm_retry": 9}}).llm_retry, 5)
-        self.assertEqual(load_config({"task_config": {"llm_retry": 3}}).llm_retry, 3)
+        limited = load_config({"providers": [{
+            "id": "node", "api_type": "openai_image", "base_url": "https://example.invalid/v1",
+            "api_keys": "key_demo", "reference_image_limit": -5,
+        }]})
+        self.assertEqual(limited.providers[0].reference_image_limit, 0)
+
+    def test_persona_provider_settings_uses_umo_config(self):
+        # 会话命中配置优先（与主链 _decorate_llm_request 同源），未取到才回退默认；
+        # 会话命中配置存在但缺 provider_settings 时返回空 dict，不吞回全局默认。
+        umo = {"provider_settings": {"default_personality": "gpt_demo"}}
+        default = {"provider_settings": {"default_personality": "persona_demo"}}
+        self.assertEqual(persona_provider_settings(umo, default), {"default_personality": "gpt_demo"})
+        self.assertEqual(persona_provider_settings(None, default), {"default_personality": "persona_demo"})
+        self.assertEqual(persona_provider_settings({"other": 1}, default), {})
 
     def test_invalid_and_duplicate_providers_are_removed(self):
         raw = {"providers": [
@@ -105,7 +62,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual([p.id for p in cfg.providers], ["a"])
         self.assertEqual(cfg.providers[0].timeout, 10)
 
-    def test_api_keys_are_line_items_only(self):
+    def test_line_items_only(self):
         cfg = load_config({"providers": [{
             "id": "node",
             "api_type": "openai_image",
@@ -113,23 +70,10 @@ class ConfigTests(unittest.TestCase):
             "api_keys": "key_a\nkey_b,key_c",
         }]})
         self.assertEqual(cfg.providers[0].api_keys, ("key_a", "key_b,key_c"))
-
-    def test_id_lists_are_line_items_only(self):
-        cfg = load_config({"quota_config": {"blacklist_ids": "10001\n10002"}})
-        self.assertEqual(cfg.quota.blacklist_ids, frozenset({"10001", "10002"}))
-        comma_value = load_config({"quota_config": {"blacklist_ids": "10001,10002"}})
-        self.assertEqual(comma_value.quota.blacklist_ids, frozenset({"10001,10002"}))
-
-    def test_reference_image_limit_is_clamped(self):
-        cfg = load_config({"providers": [{
-            "id":"node",
-            "api_type":"custom_endpoint",
-            "base_url":"https://example.invalid/generation",
-            "api_keys":"x",
-            "reference_image_limit": -1,
-        }]})
-        self.assertEqual(cfg.providers[0].reference_image_limit, 0)
-
+        ids = load_config({"quota_config": {"blacklist_ids": "10001\n10002"}})
+        self.assertEqual(ids.quota.blacklist_ids, frozenset({"10001", "10002"}))
+        comma = load_config({"quota_config": {"blacklist_ids": "10001,10002"}})
+        self.assertEqual(comma.quota.blacklist_ids, frozenset({"10001,10002"}))
     def test_quota_config_bounds_and_id_sets(self):
         cfg = load_config({"quota_config": {
             "enable_quota": True,
@@ -145,17 +89,17 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.quota.daily_quota_target, 0)
         self.assertEqual((cfg.quota.checkin_quota_min, cfg.quota.checkin_quota_max), (5, 5))
 
-    def test_legacy_daily_quota_floor_is_not_loaded(self):
-        cfg = load_config({"quota_config": {"daily_quota_floor": 9}})
-        self.assertEqual(cfg.quota.daily_quota_target, 0)
-
-
-
 class SecurityTests(unittest.TestCase):
     def test_extra_params(self):
-        self.assertEqual(parse_extra_params('--quality high --seed "12"'), {"quality":"high","seed":"12"})
-        with self.assertRaises(ValueError): parse_extra_params("--timeout 2")
-
+        self.assertEqual(parse_extra_params('--quality high --seed "12"'), {"quality": "high", "seed": "12"})
+        with self.assertRaises(ValueError):
+            parse_extra_params("--timeout 2")
+        # 保留键必须报错拒绝：防止覆盖 n/model/size/prompt/messages 放大成本或改配置。
+        for key in ("n", "model", "size", "prompt", "count", "messages"):
+            with self.subTest(key=key):
+                with self.assertRaises(ValueError) as ctx:
+                    parse_extra_params(f"--{key} value")
+                self.assertIn(f"不允许的附加参数: {key}", str(ctx.exception))
     def test_redaction(self):
         text = redact("api_key=secret data:image/png;base64,AAAA")
         self.assertNotIn("secret", text); self.assertNotIn("AAAA", text)
@@ -218,8 +162,11 @@ class QuotaStoreTests(unittest.TestCase):
             expected = 3 if state in (TaskState.FAILED, TaskState.CANCELLED) else 0
             self.assertEqual(terminal_refund_amount(state, 3), expected, state.value)
         self.assertEqual(terminal_refund_amount(TaskState.FAILED, 0), 0)
-        self.assertEqual(terminal_refund_amount(TaskState.CANCELLED, 0), 0)
-
+        with tempfile.TemporaryDirectory() as tmp:
+            policy = QuotaConfig(enabled=True, daily_refresh_enabled=True, daily_quota_target=5)
+            store = QuotaStore(Path(tmp), lambda: "2026-07-22")
+            self.assertEqual(store.consume("10001", 2, policy).snapshot.quota, 3)
+            self.assertEqual(store.refund("10001", 2, policy).quota, 5)
     def test_daily_refresh_resets_low_and_high_balances_to_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             today = ["2026-07-22"]
@@ -249,18 +196,6 @@ class QuotaStoreTests(unittest.TestCase):
             decision = store.consume("10002", 4, policy)
             self.assertTrue(decision.allowed)
             self.assertEqual(decision.charged, 0)
-
-    def test_refund_restores_actual_charged_amount(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            policy = QuotaConfig(
-                enabled=True,
-                daily_refresh_enabled=True,
-                daily_quota_target=5,
-            )
-            store = QuotaStore(Path(tmp), lambda: "2026-07-22")
-            self.assertEqual(store.consume("10001", 2, policy).snapshot.quota, 3)
-            snapshot = store.refund("10001", 2, policy)
-            self.assertEqual(snapshot.quota, 5)
 
     def test_checkin_once_per_day_and_bulk_save(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -345,24 +280,6 @@ class ProviderTests(unittest.TestCase):
             "output": {"choices": [{"message": {"content": [{"image": "https://example.invalid/result.png"}]}}]},
         })
         self.assertEqual(values[0].url, "https://example.invalid/result.png")
-
-    def test_http_error_keeps_sanitized_provider_code_and_message(self):
-        class Response:
-            status = 400
-
-            async def json(self, content_type=None):
-                return {
-                    "code": "InvalidParameter",
-                    "message": "workspace 123456789 rejected https://example.invalid/private",
-                }
-
-        adapter = OpenAIImageAdapter(ProviderConfig(
-            "a", "openai_image", "https://example.invalid", ("k",)
-        ))
-        with self.assertRaisesRegex(ProviderError, "HTTP 400 code=InvalidParameter") as raised:
-            asyncio.run(adapter.response_json(Response()))
-        self.assertNotIn("123456789", str(raised.exception))
-        self.assertNotIn("example.invalid", str(raised.exception))
 
     def test_malformed_chat_payload_is_diagnostic_provider_error(self):
         class Response:

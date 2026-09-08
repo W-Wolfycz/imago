@@ -16,16 +16,20 @@ from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools, register
 
 try:
-    from astrbot.core.utils.quoted_message import extract_quoted_message_images
+    from astrbot.core.utils.quoted_message import (
+        extract_quoted_message_images,
+        extract_quoted_message_text,
+    )
 except ImportError:  # AstrBot 旧版本仅处理 Reply.chain 内嵌图片
     extract_quoted_message_images = None
+    extract_quoted_message_text = None
 
 from .core.commands import GreedyStr
 from .core.config import load_config, persona_provider_settings
 from .core.errors import QuotaError, safe_creation_error_message
 from .core.models import DrawTask, GenerationRequest, ImageInput, ImageResult, TaskStage, TaskState
 from .core.network import fetch_reference, materialize_result
-from .core.references import ReferencePlanner
+from .core.references import ReferencePlanner, quoted_reply_missing_images
 from .core.prompting import (
     REFERENCE_CAPTION_SYSTEM,
     SUMMARY_SYSTEM,
@@ -56,7 +60,7 @@ PENDING_PHOTO = "📸 正在为当前人设「{persona}」拍摄，请稍后…�
 FOREGROUND_REFERENCE_TIMEOUT = 30.0
 
 
-@register("imago", "Wolfycz", "异步图片生成与 Persona 素材管理", "1.1.3")
+@register("imago", "Wolfycz", "异步图片生成与 Persona 素材管理", "1.1.4")
 class Imago(Star):
     _STAGE_LABELS = {
         TaskStage.QUEUED: "排队中",
@@ -495,7 +499,9 @@ class Imago(Star):
         ref-upload _event_references 三处复用同一逻辑：
         - extractor 依赖事件生命周期内的平台能力（OneBot get_msg / get_image），
           必须在事件结束前调用，后台事件结束后调用可能返回空；
-        - 返回空且 strict=True 时抛“引用消息图片无法获取”，不静默丢图；
+        - 严格模式只在“完全取不到引用内容”时抛“引用消息图片无法获取”：取到图片
+          就接管；取到正文（非图片占位）说明引用消息存在且不含图，按纯文生图继续
+          （用户回复一条文字消息后要求画图是常见用法，不应整轮失败）；
         - 拿到 source 后仍走 fetch_reference（SSRF/大小校验）与 sha256 去重；
         - 失败向上传播，由调用方决定失败时机（_submit 在扣额度/调度前抛出）。
         """
@@ -510,15 +516,26 @@ class Imago(Star):
             if strict:
                 raise ValueError("引用消息图片无法获取") from exc
             return
-        if not sources and strict:
-            raise ValueError("引用消息图片无法获取")
-        if sources:
-            self._debug(
-                "%s 引用消息图片解析成功 count=%d strict=%s",
-                self._log_prefix(event),
-                len(sources),
-                strict,
-            )
+        if not sources:
+            quoted_text = ""
+            if strict and extract_quoted_message_text is not None:
+                try:
+                    quoted_text = str(await extract_quoted_message_text(event, component) or "")
+                except Exception:
+                    quoted_text = ""
+            if quoted_reply_missing_images(
+                strict=strict, image_sources=sources, quoted_text=quoted_text
+            ):
+                raise ValueError("引用消息图片无法获取")
+            if strict:
+                self._debug("%s 引用消息存在但无图片，按无参考图继续", self._log_prefix(event))
+            return
+        self._debug(
+            "%s 引用消息图片解析成功 count=%d strict=%s",
+            self._log_prefix(event),
+            len(sources),
+            strict,
+        )
         for source in sources or []:
             try:
                 image = await fetch_reference(

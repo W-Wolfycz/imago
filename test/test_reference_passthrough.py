@@ -21,7 +21,7 @@ from unittest.mock import patch
 from imago.core.errors import ReferenceImageError
 from imago.core.models import GenerationRequest, ImageInput, ProviderConfig
 from imago.core.network import detect_image_mime, fetch_reference
-from imago.core.references import ReferencePlanner
+from imago.core.references import ReferencePlanner, quoted_reply_missing_images
 from imago.providers.openai_image import OpenAIImageAdapter
 
 PNG = b"\x89PNG\r\n\x1a\n" + bytes(24)
@@ -39,14 +39,11 @@ class FetchReferenceBase64Tests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image.data, PNG)
         self.assertEqual(image.filename, "base64-reference.png")
 
-    async def test_base64_invalid_alphabet_raises(self):
+    async def test_base64_invalid_or_oversize_raises(self):
         with self.assertRaises(ReferenceImageError):
             await fetch_reference(None, "base64://!!not-base64!!", max_bytes=4096, block_private=True)
-
-    async def test_base64_oversize_raises(self):
         with self.assertRaisesRegex(ReferenceImageError, "过大"):
             await fetch_reference(None, "base64://" + b64(PNG), max_bytes=16, block_private=True)
-
     async def test_local_path_still_supported(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "ref.png"
@@ -375,6 +372,23 @@ class ResolveCheckedUrlTests(unittest.IsolatedAsyncioTestCase):
         request_url, headers = await _resolve_checked_url("https://1.1.1.1/a.png", block_private=True)
         self.assertEqual(request_url, "https://1.1.1.1/a.png")
         self.assertIsNone(headers)
+
+
+class QuotedReplyMissingImagesTests(unittest.TestCase):
+    def test_strict_only_fails_when_quoted_content_is_unavailable(self):
+        # 有图：不算失败
+        self.assertFalse(quoted_reply_missing_images(strict=True, image_sources=["a.png"]))
+        # 非严格：不算失败
+        self.assertFalse(quoted_reply_missing_images(strict=False, image_sources=[]))
+        # 严格 + 无图 + 取到正文：引用消息存在且不含图 → 继续
+        self.assertFalse(quoted_reply_missing_images(
+            strict=True, image_sources=[], quoted_text="抱歉，这张没拍成"
+        ))
+        # 严格 + 无图 + 正文只是图片占位符 / 完全取不到：判定失败
+        self.assertTrue(quoted_reply_missing_images(
+            strict=True, image_sources=[], quoted_text="[图片]"
+        ))
+        self.assertTrue(quoted_reply_missing_images(strict=True, image_sources=[], quoted_text=""))
 
 
 if __name__ == "__main__":
