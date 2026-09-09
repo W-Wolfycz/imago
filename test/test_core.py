@@ -120,24 +120,24 @@ class SecurityTests(unittest.TestCase):
 
 
 class PersonaStoreTests(unittest.TestCase):
-    def test_hash_invalidation_manual_override_and_duplicate(self):
+    def test_summary_persists_until_explicit_update(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = PersonaStore(Path(tmp), 1024)
             store.set_summary("p", "old", "black hair", manual=False)
-            self.assertIsNone(store.get_summary("p", "new"))
+            # Prompt 变化不再让摘要失效（摘要只认用户显式重建/保存）。
+            self.assertEqual(store.get_summary("p", "new")["summary"], "black hair")
             store.set_summary("p", "old", "manual", manual=True)
             self.assertEqual(store.get_summary("p", "new")["summary"], "manual")
             store.add_reference("p", b"image", "image/png")
             with self.assertRaises(DuplicateImage): store.add_reference("p", b"image", "image/png")
 
-    def test_visual_summary_invalidates_when_selected_reference_disappears(self):
+    def test_summary_survives_reference_deletion(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = PersonaStore(Path(tmp), 1024)
             reference = store.add_reference("p", b"new-image", "image/png")
             store.set_summary("p", "prompt", "summary", manual=False, reference_names=[reference["name"]])
-            self.assertIsNotNone(store.get_summary("p", "prompt"))
             store.delete_reference("p", reference["name"])
-            self.assertIsNone(store.get_summary("p", "prompt"))
+            self.assertEqual(store.get_summary("p", "prompt")["summary"], "summary")
 
     def test_task_inputs_outputs_and_manifest_are_persisted_without_identity(self):
         with tempfile.TemporaryDirectory() as tmp:

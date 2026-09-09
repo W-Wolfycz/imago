@@ -149,16 +149,13 @@ class PersonaStore:
                 pass
 
     def get_summary(self, persona_id: str, prompt: str) -> dict | None:
-        item = self._load_summaries().get(persona_id)
-        if not item:
-            return None
-        if not item.get("manual") and item.get("source_hash") != self.prompt_hash(prompt):
-            return None
-        if not item.get("manual") and item.get("uses_references"):
-            names = item.get("reference_names", []) or []
-            if item.get("reference_hash", "") != self.reference_fingerprint(persona_id, names):
-                return None
-        return item
+        """取已保存的外观摘要。
+
+        摘要只认用户显式操作（WebUI 重建/保存、`/imago summary-rebuild`）：
+        Persona Prompt 变化或参考图增删都不会让它失效，避免「没动它就没了」。
+        prompt 参数仅为兼容调用方签名（只在 set_summary 时记录 source_hash）。
+        """
+        return self._load_summaries().get(persona_id)
 
     def set_summary(self, persona_id: str, prompt: str, summary: str, *, manual: bool, reference_names=None) -> dict:
         summary = " ".join(summary.split())

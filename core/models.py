@@ -73,6 +73,7 @@ class RuntimeConfig:
     llm_caption: bool = False
     llm_caption_cm_context: bool = False
     llm_caption_pregen: bool = False
+    at_trigger_user: bool = True
     max_upload_bytes: int = 20 * 1024 * 1024
     temp_cache_bytes: int = 512 * 1024 * 1024
     block_private_networks: bool = True

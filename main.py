@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 import aiohttp
 from astrbot.api import logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import At, Image, Plain, Reply
+from astrbot.api.message_components import At, Image, Plain
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.star import Context, Star, StarTools, register
 
@@ -60,7 +60,7 @@ PENDING_PHOTO = "📸 正在为当前人设「{persona}」拍摄，请稍后…�
 FOREGROUND_REFERENCE_TIMEOUT = 30.0
 
 
-@register("imago", "Wolfycz", "异步图片生成与 Persona 素材管理", "1.1.4")
+@register("imago", "Wolfycz", "异步图片生成与 Persona 素材管理", "1.1.5")
 class Imago(Star):
     _STAGE_LABELS = {
         TaskStage.QUEUED: "排队中",
@@ -1091,14 +1091,15 @@ class Imago(Star):
                 usable_output_count=usable_output_count,
                 delivery_kind=delivery_kind,
             )
+        cfg = load_config(self.raw_config)
+        # 主动发送的链首：群聊 @ 触发者（私聊不加；取不到触发者 ID 就不加）。
+        head: list = []
+        if cfg.at_trigger_user and task.owner_user_id and ":GroupMessage:" in str(task.umo):
+            head.append(At(qq=task.owner_user_id))
         if not generation_success:
-            message_id = getattr(getattr(event, "message_obj", None), "message_id", None)
-            if message_id:
-                chain.append(Reply(id=message_id, sender_id=event.get_sender_id()))
             chain.append(Plain("绘制超时，请稍后再试。" if task.state == TaskState.TIMED_OUT else "绘制失败，请稍后再试。"))
         elif task.errors:
             chain.append(Plain("部分图片绘制失败。"))
-        cfg = load_config(self.raw_config)
         if cfg.llm_caption:
             caption = ""
             pregen_task = task.runtime.get("caption_pregen_task")
@@ -1138,6 +1139,9 @@ class Imago(Star):
                 else:
                     chain.append(Plain(caption))
                 task.runtime["caption_applied"] = True
+        if head:
+            # 引用/@ 永远排在整条消息最前（配文与图片在其后）。
+            chain = [*head, *chain]
         self.scheduler.set_stage(task, TaskStage.DECORATING)
         task.runtime[f"{delivery_prefix}_attempted"] = True
         send_outcome = await self.sender.send(
