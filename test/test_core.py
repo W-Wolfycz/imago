@@ -4,7 +4,15 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from imago.core.config import load_config, persona_provider_settings
+from imago.core.config import (
+    STYLE_OPTIONS,
+    STYLES,
+    load_config,
+    optimizer_in_use,
+    persona_provider_settings,
+    style_arg_consumed,
+)
+from imago.core.dedup import DEDUPE_WINDOW_SECONDS, is_duplicate_request
 from imago.core.errors import (
     DuplicateImage,
     NoOutputError,
@@ -19,6 +27,7 @@ from imago.providers.openai_chat import OpenAIChatAdapter
 from imago.providers.openai_image import OpenAIImageAdapter
 from imago.core.prompting import (
     DEFAULT_OPTIMIZER_SYSTEM,
+    STYLE_GUIDANCE,
     optimizer_system,
     persona_optimizer_input,
     summary_user_prompt,
@@ -51,6 +60,89 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(persona_provider_settings(umo, default), {"default_personality": "gpt_demo"})
         self.assertEqual(persona_provider_settings(None, default), {"default_personality": "persona_demo"})
         self.assertEqual(persona_provider_settings({"other": 1}, default), {})
+
+    def test_style_labels_map_to_internal_keys_and_legacy_values_fall_back(self):
+        for label, internal in (
+            ("realistic(真人实拍)", "realistic"),
+            ("illustration(手绘插画)", "illustration"),
+            ("pixel(像素阵列)", "pixel"),
+            ("logo(LOGO 设计)", "logo"),
+            ("real3d(照片级三维渲染)", "real3d"),
+            ("cg3d(风格化三维渲染)", "cg3d"),
+            ("auto(自动)", "auto"),
+            ("illustration", "illustration"),
+            # 有意不做旧值兼容：1.1.6 之前的标签一律回退 default(通用)，升级后需重新
+            # 在 WebUI 选一次（用户量小，口头通知即可）。别把它"修"成别名表。
+            ("realistic(写实)", "default"),
+            ("anime(动漫)", "default"),
+            ("3d(3D渲染)", "default"),
+            ("cinematic(电影感)", "default"),
+            ("figurine(手办化)", "default"),
+            ("cyberpunk(赛博朋克)", "default"),
+            ("anime", "default"),
+            ("3d", "default"),
+            ("不存在的风格", "default"),
+        ):
+            with self.subTest(label=label):
+                cfg = load_config({"optimizer_config": {"optimizer_style": label}})
+                self.assertEqual(cfg.optimizer_style, internal)
+
+    def test_style_labels_match_schema_options(self):
+        # 配置标签是解析键：WebUI 的 options 与 STYLE_OPTIONS 必须逐项一致，否则用户
+        # 选中某个基准后会被静默回退成 default(通用)。
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        options = schema["optimizer_config"]["items"]["optimizer_style"]["options"]
+        self.assertEqual(options, list(STYLE_OPTIONS))
+        for label, key in STYLE_OPTIONS.items():
+            with self.subTest(label=label):
+                self.assertIn(key, STYLES)
+
+    def test_plain_draw_optimizer_and_at_switch_defaults(self):
+        # 用户可见开关：键名/默认值必须与 _conf_schema.json 一致，改动 schema 却忘记
+        # 同步代码时这里会失败（普通绘图走副脑默认关闭、结果 @ 触发者默认开启）。
+        default = load_config({})
+        self.assertFalse(default.optimize_plain_draw)
+        self.assertTrue(default.at_trigger_user)
+        cfg = load_config({
+            "optimizer_config": {"optimize_plain_draw": True},
+            "task_config": {"at_trigger_user": False},
+        })
+        self.assertTrue(cfg.optimize_plain_draw)
+        self.assertFalse(cfg.at_trigger_user)
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        item = schema["optimizer_config"]["items"]["optimize_plain_draw"]
+        self.assertEqual(item["type"], "bool")
+        self.assertFalse(item["default"])
+
+    def test_optimizer_in_use_is_independent_of_style_linkage(self):
+        # 「是否走副脑」只由总开关 + 任务来源决定，与成像基准的联动无关。
+        cfg = load_config({"optimizer_config": {"optimize_plain_draw": True}})
+        self.assertTrue(optimizer_in_use(cfg, persona=True, plain_draw_tool=False))
+        self.assertTrue(optimizer_in_use(cfg, persona=False, plain_draw_tool=True))
+        # /画 等指令路径（plain_draw_tool=False）即使开关开启也不经副脑。
+        self.assertFalse(optimizer_in_use(cfg, persona=False, plain_draw_tool=False))
+        off = load_config({"optimizer_config": {"optimize_plain_draw": False}})
+        self.assertTrue(optimizer_in_use(off, persona=True, plain_draw_tool=False))
+        self.assertFalse(optimizer_in_use(off, persona=False, plain_draw_tool=True))
+        # 总开关关闭：任何路径都不调用副脑。
+        disabled = load_config({"optimizer_config": {"enable_optimizer": False, "optimize_plain_draw": True}})
+        self.assertFalse(optimizer_in_use(disabled, persona=True, plain_draw_tool=True))
+        self.assertFalse(optimizer_in_use(disabled, persona=False, plain_draw_tool=True))
+
+    def test_style_arg_consumed_only_with_optimizer_or_fallback_suffix(self):
+        # 主 LLM 的基准参数只在两种情形被消费：本轮副脑参与，或降级后缀注入开启；
+        # 其余情形丢弃（没有消费方）。这是规格边界，改动前请先改这里。
+        auto = load_config({"optimizer_config": {"optimizer_style": "auto(自动)"}})
+        with_fallback = load_config({"optimizer_config": {
+            "optimizer_style": "auto(自动)", "fallback_style_injection": True,
+        }})
+        self.assertTrue(style_arg_consumed(auto, use_optimizer=True))
+        self.assertFalse(style_arg_consumed(auto, use_optimizer=False))
+        self.assertTrue(style_arg_consumed(with_fallback, use_optimizer=False))
+        self.assertTrue(style_arg_consumed(with_fallback, use_optimizer=True))
+        # 配置写死基准时，配置优先与是否消费无关（resolve_style 保证）
+        fixed = load_config({"optimizer_config": {"optimizer_style": "realistic(真人实拍)"}})
+        self.assertTrue(style_arg_consumed(fixed, use_optimizer=True))
 
     def test_invalid_and_duplicate_providers_are_removed(self):
         raw = {"providers": [
@@ -307,11 +399,17 @@ class ProviderTests(unittest.TestCase):
 
 class PromptingTests(unittest.TestCase):
     def test_optimizer_uses_safe_default_and_preserves_user_priority(self):
-        prompt = optimizer_system("", "anime", persona=True)
+        prompt = optimizer_system("", "illustration", persona=True)
         self.assertIn(DEFAULT_OPTIMIZER_SYSTEM, prompt)
         self.assertIn("始终优先", prompt)
         self.assertIn("不得复制", prompt)
-        self.assertIn("风格预设：", prompt)
+        # 基准由插件裁决后锁定交给副脑执行，副脑不得改换基准（但学派/题材/光影/
+        # 效果要在基准之上按用户措辞补写）；"用户优先"条款不含基准本身。
+        self.assertIn("本轮成像基准已固定为「手绘插画」", prompt)
+        self.assertIn("不得混入其它基准的特征", prompt)
+        self.assertIn("基准已由插件固定，不在此列", prompt)
+        self.assertIn(STYLE_GUIDANCE["illustration"], prompt)
+        self.assertNotIn("指定的风格", prompt)
 
 class SafeCreationErrorTests(unittest.TestCase):
     def test_whitelist_messages_pass_through(self):
@@ -389,6 +487,51 @@ class ProviderErrorDetailTests(unittest.IsolatedAsyncioTestCase):
         message = str(ctx.exception)
         self.assertIn("HTTP 502", message)
         self.assertIn("Gateway Timeout (relay)", message)
+
+
+class DuplicateRequestTests(unittest.TestCase):
+    def test_same_trigger_message_is_duplicate_regardless_of_wording(self):
+        records = [{"dedupe_key": "A", "trigger_message_id": "m1", "created_at": 100.0}]
+        # 同一条触发消息：措辞不同（指纹不同）也判重复——一条消息只建一个任务。
+        self.assertTrue(is_duplicate_request(records, dedupe_key="B", trigger_message_id="m1", now=101.0))
+        # 用户新发一条消息（ID 不同）：允许再生成同一画面。
+        self.assertFalse(is_duplicate_request(records, dedupe_key="A", trigger_message_id="m2", now=101.0))
+        # 缺少触发消息 ID：退化为「同内容 + 时间窗」。
+        self.assertTrue(is_duplicate_request(records, dedupe_key="A", trigger_message_id="", now=101.0))
+        self.assertFalse(is_duplicate_request(records, dedupe_key="B", trigger_message_id="", now=101.0))
+        self.assertFalse(
+            is_duplicate_request(
+                records, dedupe_key="A", trigger_message_id="",
+                now=100.0 + DEDUPE_WINDOW_SECONDS + 1,
+            )
+        )
+
+    def test_in_flight_task_blocks_without_message_id_beyond_window(self):
+        # 退化路径：在途任务不受窗口限制（出图可能远超窗口），超窗仍算重复；
+        # 已结束任务超过窗口后放行。
+        in_flight = [{
+            "dedupe_key": "A", "trigger_message_id": "", "created_at": 100.0, "pending": True,
+        }]
+        self.assertTrue(
+            is_duplicate_request(
+                in_flight, dedupe_key="A", trigger_message_id="",
+                now=100.0 + DEDUPE_WINDOW_SECONDS + 1,
+            )
+        )
+        finished = [{**in_flight[0], "pending": False}]
+        self.assertFalse(
+            is_duplicate_request(
+                finished, dedupe_key="A", trigger_message_id="",
+                now=100.0 + DEDUPE_WINDOW_SECONDS + 1,
+            )
+        )
+        # 双方都有消息 ID 时仍只比 ID：在途标记不参与判定。
+        self.assertFalse(
+            is_duplicate_request(
+                [{**in_flight[0], "trigger_message_id": "m1"}],
+                dedupe_key="A", trigger_message_id="m2", now=100.0,
+            )
+        )
 
 
 if __name__ == "__main__": unittest.main()

@@ -25,13 +25,20 @@ except ImportError:  # AstrBot 旧版本仅处理 Reply.chain 内嵌图片
     extract_quoted_message_text = None
 
 from .core.commands import GreedyStr
-from .core.config import load_config, persona_provider_settings
-from .core.errors import QuotaError, safe_creation_error_message
+from .core.config import (
+    load_config,
+    optimizer_in_use,
+    persona_provider_settings,
+    style_arg_consumed,
+)
+from .core.dedup import DEDUPE_WINDOW_SECONDS, is_duplicate_request, request_fingerprint
+from .core.errors import DuplicateRequest, QuotaError, safe_creation_error_message
 from .core.models import DrawTask, GenerationRequest, ImageInput, ImageResult, TaskStage, TaskState
 from .core.network import fetch_reference, materialize_result
 from .core.references import ReferencePlanner, quoted_reply_missing_images
 from .core.prompting import (
     REFERENCE_CAPTION_SYSTEM,
+    STYLE_AUTO,
     SUMMARY_SYSTEM,
     VISION_SYSTEM,
     caption_system_text,
@@ -40,7 +47,10 @@ from .core.prompting import (
     optimizer_system,
     persona_optimizer_input,
     reference_caption_user_prompt,
+    resolve_style,
     sanitize_caption,
+    scene_optimizer_input,
+    style_prompt_suffix,
     summary_user_prompt,
     vision_user_prompt,
 )
@@ -60,7 +70,7 @@ PENDING_PHOTO = "📸 正在为当前人设「{persona}」拍摄，请稍后…�
 FOREGROUND_REFERENCE_TIMEOUT = 30.0
 
 
-@register("imago", "Wolfycz", "异步图片生成与 Persona 素材管理", "1.1.5")
+@register("imago", "Wolfycz", "异步图片生成与 Persona 素材管理", "1.2.0")
 class Imago(Star):
     _STAGE_LABELS = {
         TaskStage.QUEUED: "排队中",
@@ -243,6 +253,25 @@ class Imago(Star):
         except Exception:
             return []
 
+    def _is_duplicate_submission(self, event, fingerprint: str, trigger_message_id: str) -> bool:
+        """本条用户消息是否已创建过绘图任务（或缺少消息 ID 时的同内容在途/刚结束任务）。"""
+        records = [
+            {
+                "dedupe_key": task.runtime.get("dedupe_key", ""),
+                "trigger_message_id": task.runtime.get("trigger_message_id", ""),
+                "created_at": task.created_at,
+                "pending": not task.state.is_terminal,
+            }
+            for task in self._tasks_for_event(event)
+        ]
+        return is_duplicate_request(
+            records,
+            dedupe_key=fingerprint,
+            trigger_message_id=trigger_message_id,
+            now=time.monotonic(),
+            window=DEDUPE_WINDOW_SECONDS,
+        )
+
     def _task_status_lines(self, tasks):
         now = time.monotonic()
         lines = []
@@ -388,19 +417,47 @@ class Imago(Star):
         if not persona_id or not prompt: raise ValueError("Persona 不存在或 prompt 为空")
         return persona_id, prompt
 
-    async def _submit(self, event, prompt: str, *, persona=False, resolved_persona=None, count=1, aspect_ratio="", size="", extra_params=""):
+    async def _submit(self, event, prompt: str, *, persona=False, resolved_persona=None, count=1, aspect_ratio="", size="", extra_params="", style="", plain_draw_tool=False):
         """创建后台绘图/Persona 图片任务。
 
         引用消息在事件阶段前台解析（extractor 依赖事件生命周期内的平台能力，
         推迟到后台可能返回空导致静默丢图），失败在扣额度/调度之前抛出，不会先
         扣费后因引用图失败而退款。HTTP 正文 URL 与明确 Image 的远程下载仍保留
         后台延迟解析。
+
+        `style` 是主 LLM 传的风格参数，`plain_draw_tool` 标记本次调用来自
+        generate_image 工具（普通绘图据此走副脑逻辑；Persona 出镜任务本就按副脑
+        配置处理，不需要该标记）。两者最终是否生效由 `_prepare` 里的
+        `resolve_style` 与配置裁决，`/画` 指令两者都不传。
         """
         if not prompt.strip(): raise ValueError("提示词不能为空")
         count = max(1, min(4, int(count)))
         cfg = load_config(self.raw_config)
         if not cfg.providers: raise ValueError("未配置有效图片节点")
         parsed_extra = parse_extra_params(extra_params)
+        # 单轮重复调用防护：同一触发消息 + 同一画面内容已有在途/刚结束任务时不再
+        # 重复创建（主 LLM 可能在同一轮内连续调用两次同一工具，导致双份生成扣费）。
+        requested_style = str(style or "").strip().lower()
+        fingerprint = request_fingerprint(
+            "persona" if persona else "draw",
+            prompt,
+            count,
+            size,
+            aspect_ratio,
+            extra_params,
+            requested_style,
+        )
+        trigger_message_id = str(
+            getattr(getattr(event, "message_obj", None), "message_id", "") or ""
+        )
+        if self._is_duplicate_submission(event, fingerprint, trigger_message_id):
+            # 用户可感知事件（「第二张图没出现」）：INFO 留痕便于线上排查，不写消息 ID。
+            logger.info(
+                "%s 忽略重复绘图请求 kind=%s（同一条用户消息或同内容任务已在处理中）",
+                self._log_prefix(event),
+                "persona" if persona else "draw",
+            )
+            raise DuplicateRequest()
         access = self._quota_access(event, count)
         if access is not None and not access.allowed:
             raise QuotaError(access.reason)
@@ -441,6 +498,10 @@ class Imago(Star):
         task.runtime["finalize"] = self._finalize_task
         task.runtime["primary_provider_id"] = self.store.get_primary_provider_id()
         task.runtime["deferred_references"] = background_deferred
+        task.runtime["dedupe_key"] = fingerprint
+        task.runtime["trigger_message_id"] = trigger_message_id
+        task.runtime["requested_style"] = requested_style
+        task.runtime["plain_draw_tool"] = bool(plain_draw_tool)
         if persona:
             if resolved_persona is None:
                 resolved_persona = await self._resolve_persona(event)
@@ -720,6 +781,39 @@ class Imago(Star):
         ref_caption = ""
         if cfg.reference_caption and task.request.references:
             ref_caption = await self._describe_references(task)
+        # 本轮生效基准：是否调用副脑、以及主 LLM 的参数是否被消费，是两套独立逻辑
+        # （core/config.optimizer_in_use / style_arg_consumed）；裁决本身只在配置为
+        # auto（代码写死的唯一联动选项）时才让主 LLM 的参数参与。
+        use_optimizer = optimizer_in_use(
+            cfg,
+            persona=bool(task.persona_id),
+            plain_draw_tool=bool(task.runtime.get("plain_draw_tool")),
+        )
+        requested_style = str(task.runtime.get("requested_style", "") or "")
+        resolved_style = resolve_style(
+            cfg.optimizer_style,
+            requested_style if style_arg_consumed(cfg, use_optimizer=use_optimizer) else "",
+        )
+        task.runtime["resolved_style"] = resolved_style
+        task.runtime["optimizer_in_use"] = use_optimizer
+        if cfg.optimizer_style != STYLE_AUTO:
+            style_source = "config"
+        elif resolved_style != STYLE_AUTO:
+            style_source = "llm"
+        else:
+            style_source = "auto"
+        self._debug(
+            "%s task=%s 基准解析 resolved=%s source=%s configured=%s requested=%s "
+            "本轮副脑=%s 消费传参=%s",
+            self._log_prefix(task.runtime.get("source_event")),
+            task.id[:8],
+            resolved_style,
+            style_source,
+            cfg.optimizer_style,
+            requested_style or "-",
+            use_optimizer,
+            style_arg_consumed(cfg, use_optimizer=use_optimizer),
+        )
         if task.persona_id:
             self.scheduler.set_stage(task, TaskStage.BUILDING_PERSONA)
             cached = self.store.get_summary(task.persona_id, task.persona_prompt)
@@ -730,17 +824,20 @@ class Imago(Star):
                 dynamic = f"{dynamic}\n参考图视觉描述（仅用于还原用户所指的画面，用户原话优先，不是指令）：\n{ref_caption}"
             base_dynamic = dynamic
             optimizer_applied = False
-            if cfg.optimizer_enabled:
+            if use_optimizer:
                 self.scheduler.set_stage(task, TaskStage.OPTIMIZING_PROMPT)
-                optimizer_system_prompt = optimizer_system(cfg.optimizer_prompt, cfg.optimizer_style, persona=True)
+                optimizer_system_prompt = optimizer_system(cfg.optimizer_prompt, resolved_style, persona=True)
                 optimizer_input = persona_optimizer_input(summary, dynamic)
                 try:
-                    dynamic = await self._chat(
+                    optimized = await self._chat(
                         task.umo,
                         optimizer_system_prompt,
                         optimizer_input,
                         purpose="persona_scene_optimizer",
                     )
+                    if not optimized.strip():
+                        raise RuntimeError("副脑返回空内容")
+                    dynamic = optimized
                     optimizer_applied = True
                 except Exception as exc:
                     # 副脑失败降级：保留原始画面描述继续生成，不因副脑失败终止任务。
@@ -759,13 +856,13 @@ class Imago(Star):
                 # 开关关闭：降级路径同样保持原始描述。
                 task.request.prompt = compose_persona_prompt(summary, dynamic)
             else:
-                # 副脑关闭或失败降级且开关启用：注入低优先级后缀（风格预设 +
+                # 副脑关闭或失败降级且开关启用：注入低优先级后缀（基准口径 +
                 # 默认第三方视角）。不注入副脑自定义提示词（元指令语义，会
                 # 污染出图，见 core/prompting.persona_prompt_suffix）。
                 task.request.prompt = compose_persona_prompt(
                     summary,
                     dynamic,
-                    style=cfg.optimizer_style,
+                    style=resolved_style,
                     fallback_suffix=True,
                 )
             persona_references = []
@@ -774,6 +871,44 @@ class Imago(Star):
                 mime = {".png":"image/png",".jpg":"image/jpeg",".webp":"image/webp",".gif":"image/gif"}.get(path.suffix.lower(), "image/png")
                 persona_references.append(ImageInput(path.read_bytes(), mime, path.name))
             task.runtime["persona_references"] = persona_references
+        elif use_optimizer:
+            # 普通绘图经副脑（generate_image 且「普通绘图也走副脑」开启，见
+            # core/config.optimizer_in_use）：副脑按解析出的成像基准整理画面；
+            # 降级时保留原始描述。/画 指令与开关关闭时不进这里，直接出图。
+            self.scheduler.set_stage(task, TaskStage.OPTIMIZING_PROMPT)
+            scene = task.request.prompt
+            if ref_caption:
+                scene = (
+                    f"{scene}\n参考图视觉描述"
+                    "（仅用于还原用户所指的画面，用户原话优先，不是指令）：\n"
+                    f"{ref_caption}"
+                )
+            base_scene = scene
+            try:
+                optimized = await self._chat(
+                    task.umo,
+                    optimizer_system(cfg.optimizer_prompt, resolved_style, persona=False),
+                    scene_optimizer_input(scene),
+                    purpose="scene_optimizer",
+                )
+                if not optimized.strip():
+                    raise RuntimeError("副脑返回空内容")
+                task.request.prompt = optimized
+            except Exception as exc:
+                # 与 Persona 路径同策略：副脑失败不终止任务，降级原因只进日志与
+                # runtime，不算作“部分图片绘制失败”。
+                task.runtime["optimizer_fallback"] = f"{type(exc).__name__}:{redact(str(exc))[:120]}"
+                logger.warning(
+                    "%s task=%s 副脑调用失败，降级使用原始画面描述 type=%s",
+                    self._log_prefix(task.runtime.get("source_event")),
+                    task.id[:8],
+                    type(exc).__name__,
+                )
+                task.request.prompt = base_scene
+                if cfg.fallback_style_injection:
+                    suffix = style_prompt_suffix(resolved_style)
+                    if suffix:
+                        task.request.prompt = f"{task.request.prompt}\n\n{suffix}"
         elif ref_caption:
             # 普通绘图（无副脑）：识图描述以低优先级段落追加到最终 prompt。
             task.request.prompt = (
@@ -1517,10 +1652,10 @@ class Imago(Star):
         yield event.plain_result(f"已将主图片生成节点设为 {provider_id}；其他节点将按配置顺序 fallback。")
 
     @filter.llm_tool(name="generate_image")
-    async def generate_image(self, event: AstrMessageEvent, prompt: str, count: int = 1, aspect_ratio: str = "", size: str = "", extra_params: str = ""):
+    async def generate_image(self, event: AstrMessageEvent, prompt: str, count: int = 1, aspect_ratio: str = "", size: str = "", extra_params: str = "", style: str = ""):
         """
         当用户当前消息明确提出新生成、绘制、改图或重绘一张图片，且当前会话 Persona 本人不需要出现在画面中时，必须调用本工具。
-        不要只用文字描述成图、假装已经画好，或在未成功创建任务时声称稍后会发图。历史中已经创建过、正在处理的画面绝对不要重复调用本工具：重复调用会再次扣费并生成重复图片，工具只负责创建任务，图片会由插件后台完成后另行发送。
+        不要只用文字描述成图、假装已经画好，或在未成功创建任务时声称稍后会发图。历史中已经创建过、正在处理的画面绝对不要重复调用本工具：同一条用户消息里重复调用会被忽略，用户另发消息重复提交仍会再次扣费并生成重复图片，工具只负责创建任务，图片会由插件后台完成后另行发送。
 
         适用于场景、物品、海报、非当前会话 Persona 角色或其他普通图片。
         当前会话 Persona 本人需要出镜时应改用 generate_persona_image。
@@ -1532,26 +1667,32 @@ class Imago(Star):
         不得承诺完成百分比、排队名次或准确完成时间。
 
         Args:
-            prompt(string): 完整、可直接交给图片模型的画面提示词。插件不再调用副脑改写。
+            prompt(string): 完整、可直接交给图片模型的画面提示词，用户明确要求的风格、媒介、画面文字都照原样写进来。
             count(int): 生成数量，范围 1-4。
             aspect_ratio(string): 可选宽高比，如 1:1、16:9。
             size(string): 可选尺寸，如 1024x1024；与宽高比冲突时以 size 为准。
             extra_params(string): 只能填写用户明确提供的 --key value 参数；用户没有指定时留空。
+            style(string): 仅在能明显判断成图由什么材质构成时填写：realistic(真人实拍)、real3d(照片级三维渲染：产品商品/静物/手办摆件/模型等非人写实)、cg3d(风格化三维渲染：三维动画、游戏 CG)、illustration(手绘插画)、pixel(像素阵列)、logo(LOGO 设计：扁平矢量标志/标识)；无法明显判断时传 auto 或留空，不要猜。学派（日系/美漫/厚涂/水墨）、题材（赛博朋克/国风等）、效果（朦胧/胶片/黑白等）、形态（手办化等）不要塞进本参数，直接写进 prompt。
         """
         try:
-            await self._submit(event, prompt, count=count, aspect_ratio=aspect_ratio, size=size, extra_params=extra_params)
+            await self._submit(event, prompt, count=count, aspect_ratio=aspect_ratio, size=size, extra_params=extra_params, style=style, plain_draw_tool=True)
             return ("后台绘图任务已创建并在处理中，图片完成后插件会另行发送，"
-                    "你无需等待结果。同一画面绝对不要再次调用本工具：重复调用会再次扣费并生成重复图片。"
+                    "你无需等待结果。同一条用户消息只会创建一个绘图任务：再次调用本工具"
+                    "会被直接忽略（不会重复生成或扣费）。"
                     "请立即以当前 Persona 的语气简短回复用户，自然表达“收到灵感，正在绘制，请稍等一下”，"
                     "不要声称已经画好，也不要在本轮继续调用该工具。")
+        except DuplicateRequest:
+            return ("本条用户消息已经创建过绘图任务，本次重复调用已被忽略（未重复生成、未重复扣费）。"
+                    "请不要再次调用本工具；若用户还需要另一张不同的图，请提示用户单独再发一条消息。"
+                    "现在请直接以当前 Persona 的语气简短回复用户。")
         except Exception as exc:
             return f"后台绘图任务未能创建。可告知用户的原因：{self._safe_creation_error(exc)}。请以当前 Persona 的语气简短说明失败，不要虚构任务已开始或图片已生成。"
 
     @filter.llm_tool(name="generate_persona_image")
-    async def generate_persona_image(self, event: AstrMessageEvent, action: str, count: int = 1, aspect_ratio: str = "", size: str = "", extra_params: str = "", camera: str = ""):
+    async def generate_persona_image(self, event: AstrMessageEvent, action: str, count: int = 1, aspect_ratio: str = "", size: str = "", extra_params: str = "", camera: str = "", style: str = ""):
         """
         当用户当前消息明确提出让当前会话 Persona 自拍、拍照、发一张本人照片、以图片展示动作或场景、合影，或以其他方式本人出镜时，必须调用本工具。
-        不要只用文字扮演拍照、假装已经拍好，或在未成功创建任务时声称稍后会发照片。历史中已经创建过、正在处理的画面绝对不要重复调用本工具：重复调用会再次扣费并生成重复图片，工具只负责创建任务，图片会由插件后台完成后另行发送。
+        不要只用文字扮演拍照、假装已经拍好，或在未成功创建任务时声称稍后会发照片。历史中已经创建过、正在处理的画面绝对不要重复调用本工具：同一条用户消息里重复调用会被忽略，用户另发消息重复提交仍会再次扣费并生成重复图片，工具只负责创建任务，图片会由插件后台完成后另行发送。
 
         适用于自拍、他拍、第三人称场景照、全身照、特写、合影或其他需要当前 Persona 出镜的画面。
         当前会话 Persona 本人不需要出镜的普通绘图应改用 generate_image。
@@ -1570,14 +1711,20 @@ class Imago(Star):
             size(string): 可选尺寸，如 1024x1024；与宽高比冲突时以 size 为准。
             extra_params(string): 只能填写用户明确提供的 --key value 参数；用户没有指定时留空。
             camera(string): 可选。仅当用户本轮明确要求自拍、特写或指定机位/视角时填写（如“自拍”“怼脸”“俯拍 45 度”）；留空表示用户未指定视角，插件默认采用自然第三方视角（他拍观感）。非空时会以 Camera request 明确标记并入 action。
+            style(string): 仅在能明显判断成图由什么材质构成时填写：realistic(真人实拍)、real3d(照片级三维渲染：产品商品/静物/手办摆件/模型等非人写实)、cg3d(风格化三维渲染：三维动画、游戏 CG)、illustration(手绘插画)、pixel(像素阵列)、logo(LOGO 设计：扁平矢量标志/标识)；无法明显判断时传 auto 或留空，不要猜。学派（日系/美漫/厚涂/水墨）、题材（赛博朋克/国风等）、效果（朦胧/胶片/黑白等）、形态（手办化等）不要塞进本参数，直接写进 prompt。
         """
         action = merge_camera_request(action, camera)
         try:
-            await self._submit(event, action, persona=True, count=count, aspect_ratio=aspect_ratio, size=size, extra_params=extra_params)
+            await self._submit(event, action, persona=True, count=count, aspect_ratio=aspect_ratio, size=size, extra_params=extra_params, style=style)
             return ("后台 Persona 图片任务已创建并在处理中，图片完成后插件会另行发送，"
-                    "你无需等待结果。同一画面绝对不要再次调用本工具：重复调用会再次扣费并生成重复图片。"
+                    "你无需等待结果。同一条用户消息只会创建一个绘图任务：再次调用本工具"
+                    "会被直接忽略（不会重复生成或扣费）。"
                     "请立即以当前 Persona 的语气简短回复用户，自然表达“正在拍摄，请稍后……”，"
                     "不要声称已经拍好，也不要在本轮继续调用该工具。")
+        except DuplicateRequest:
+            return ("本条用户消息已经创建过 Persona 图片任务，本次重复调用已被忽略（未重复生成、未重复扣费）。"
+                    "请不要再次调用本工具；若用户还需要另一张不同的图，请提示用户单独再发一条消息。"
+                    "现在请直接以当前 Persona 的语气简短回复用户。")
         except Exception as exc:
             return f"后台 Persona 图片任务未能创建。可告知用户的原因：{self._safe_creation_error(exc)}。请以当前 Persona 的语气简短说明失败，不要虚构任务已开始、正在拍摄或图片已经生成。"
 

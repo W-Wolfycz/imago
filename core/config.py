@@ -6,14 +6,17 @@ from typing import Any
 from .models import ProviderConfig, QuotaConfig, RuntimeConfig
 
 API_TYPES = {"openai_image", "openai_chat", "gemini_official", "dashscope_multimodal", "custom_endpoint"}
-STYLES = {"none", "default", "realistic", "cinematic", "anime", "3d"}
+STYLES = {"none", "default", "realistic", "real3d", "cg3d", "illustration", "pixel", "logo", "auto"}
 STYLE_OPTIONS = {
     "None(无)": "none",
     "default(通用)": "default",
-    "realistic(写实)": "realistic",
-    "cinematic(电影感)": "cinematic",
-    "anime(动漫)": "anime",
-    "3d(3D渲染)": "3d",
+    "realistic(真人实拍)": "realistic",
+    "real3d(照片级三维渲染)": "real3d",
+    "cg3d(风格化三维渲染)": "cg3d",
+    "illustration(手绘插画)": "illustration",
+    "pixel(像素阵列)": "pixel",
+    "logo(LOGO 设计)": "logo",
+    "auto(自动)": "auto",
 }
 
 
@@ -31,6 +34,11 @@ def _ids(value: Any) -> frozenset[str]:
 
 
 def _style(value: Any) -> str:
+    """解析 optimizer_style：现用内部键或 WebUI 标签，其余一律回退 default(通用)。
+
+    不做旧值兼容：1.1.6 之前的标签（`anime(动漫)`、`3d(3D渲染)` 等）不再识别，
+    升级后需要重新选一次；旧配置不会被改写，只是解析结果落到 default(通用)。
+    """
     text = str(value).strip()
     if text in STYLES:
         return text
@@ -89,6 +97,7 @@ def load_config(raw: Mapping[str, Any]) -> RuntimeConfig:
             checkin_quota_max=checkin_max,
         ),
         optimizer_enabled=bool(optimizer.get("enable_optimizer", True)),
+        optimize_plain_draw=bool(optimizer.get("optimize_plain_draw", False)),
         optimizer_provider_id=str(optimizer.get("optimizer_provider_id", "")).strip(),
         vision_provider_id=str(optimizer.get("vision_provider_id", "")).strip(),
         reference_caption=bool(optimizer.get("reference_caption", False)),
@@ -107,6 +116,36 @@ def load_config(raw: Mapping[str, Any]) -> RuntimeConfig:
         block_private_networks=bool(storage.get("block_private_networks", True)),
         log_with_bot_id=bool(raw.get("log_with_bot_id", False)),
     )
+
+
+def optimizer_in_use(cfg: RuntimeConfig, *, persona: bool, plain_draw_tool: bool) -> bool:
+    """本轮任务是否调用副脑（纯逻辑，与风格联动完全独立）。
+
+    - `enable_optimizer` 是副脑总开关，关闭时任何路径都不调用；
+    - Persona 出镜任务在总开关开启时始终调用；
+    - 普通绘图只有来自 LLM 工具（`generate_image`）且 `optimize_plain_draw` 开启
+      时才调用——该开关只决定这件事，不参与风格裁决（风格联动见
+      `core.prompting.resolve_style`，唯一联动点是配置为 `auto`）。
+    """
+    if not cfg.optimizer_enabled:
+        return False
+    if persona:
+        return True
+    return bool(plain_draw_tool and cfg.optimize_plain_draw)
+
+
+def style_arg_consumed(cfg: RuntimeConfig, *, use_optimizer: bool) -> bool:
+    """主 LLM 传的基准参数是否会被本轮消费（纯逻辑）。
+
+    会被消费的只有两种情形：
+
+    - 本轮副脑参与：参数交给 `core.prompting.resolve_style` 裁决，配置为 auto 时生效；
+    - 「副脑降级时注入风格后缀」开启：副脑没跑（或调用失败降级）时也要按它注入后缀。
+
+    其余情形参数被丢弃——副脑没跑又没有降级注入时，解析出来的基准没有任何消费方，
+    留着只会让 `/画` 之类的直连路径多一个看不见的状态。
+    """
+    return bool(use_optimizer or cfg.fallback_style_injection)
 
 
 def persona_provider_settings(umo_config: Any, default_config: Any) -> dict:

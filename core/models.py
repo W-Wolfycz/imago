@@ -18,6 +18,22 @@ class TaskState(str, Enum):
     TIMED_OUT = "timed_out"
     CANCELLED = "cancelled"
 
+    @property
+    def is_terminal(self) -> bool:
+        """是否已结束（不再占用并发额度，只在完成/发送与记账阶段被引用）。"""
+        return self in _TERMINAL_STATES
+
+
+_TERMINAL_STATES = frozenset({
+    TaskState.SUCCEEDED,
+    TaskState.PARTIAL_SUCCESS,
+    TaskState.DELIVERY_FAILED,
+    TaskState.NO_OUTPUT,
+    TaskState.FAILED,
+    TaskState.TIMED_OUT,
+    TaskState.CANCELLED,
+})
+
 
 class TaskStage(str, Enum):
     QUEUED = "queued"
@@ -61,6 +77,7 @@ class RuntimeConfig:
     providers: tuple[ProviderConfig, ...]
     quota: QuotaConfig = field(default_factory=QuotaConfig)
     optimizer_enabled: bool = True
+    optimize_plain_draw: bool = False
     optimizer_provider_id: str = ""
     vision_provider_id: str = ""
     reference_caption: bool = False

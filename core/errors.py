@@ -48,6 +48,15 @@ class DuplicateImage(ImagoError):
     code = "duplicate_image"
 
 
+class DuplicateRequest(ImagoError):
+    """同一条用户消息重复调用绘图工具，或缺少消息 ID 时的同内容重复提交。"""
+
+    code = "duplicate_request"
+
+    def __init__(self, message: str = "刚刚已创建过相同画面，请稍后再试"):
+        super().__init__(message)
+
+
 # 创建阶段允许透出的固定文案：前缀白名单（冒号结尾的条目允许后跟数字等参数，
 # 如 "绘图额度不足: 3"、"不允许的附加参数: n"），不带冒号的只允许完全一致。
 _ALLOWED_ERROR_MESSAGES = (
@@ -70,6 +79,7 @@ _ALLOWED_ERROR_MESSAGES = (
     "额度必须是整数",
     "外观摘要不能为空",
     "请在同一条消息中附带图片",
+    "刚刚已创建过相同画面，请稍后再试",
 )
 
 # 参考图/SSRF 相关的固定文案：必须与已知文案完全一致才透出，
