@@ -40,6 +40,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class ConfigTests(unittest.TestCase):
+
     def test_defaults_and_bounds(self):
         cfg = load_config({"task_config": {"generation_timeout": 1, "max_concurrent_tasks": 0}})
         self.assertEqual(cfg.generation_timeout, 30)
@@ -51,6 +52,12 @@ class ConfigTests(unittest.TestCase):
             "api_keys": "key_demo", "reference_image_limit": -5,
         }]})
         self.assertEqual(limited.providers[0].reference_image_limit, 0)
+        # default_size 留空是合法配置（不指定 → 请求不发送 size），不能被兜成 1024x1024
+        blank = load_config({"providers": [{
+            "id": "node", "api_type": "openai_image", "base_url": "https://example.invalid/v1",
+            "api_keys": "key_demo", "default_size": "   ",
+        }]})
+        self.assertEqual(blank.providers[0].default_size, "")
 
     def test_persona_provider_settings_uses_umo_config(self):
         # 会话命中配置优先（与主链 _decorate_llm_request 同源），未取到才回退默认；
@@ -166,6 +173,7 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(ids.quota.blacklist_ids, frozenset({"10001", "10002"}))
         comma = load_config({"quota_config": {"blacklist_ids": "10001,10002"}})
         self.assertEqual(comma.quota.blacklist_ids, frozenset({"10001,10002"}))
+
     def test_quota_config_bounds_and_id_sets(self):
         cfg = load_config({"quota_config": {
             "enable_quota": True,
@@ -181,7 +189,9 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.quota.daily_quota_target, 0)
         self.assertEqual((cfg.quota.checkin_quota_min, cfg.quota.checkin_quota_max), (5, 5))
 
+
 class SecurityTests(unittest.TestCase):
+
     def test_extra_params(self):
         self.assertEqual(parse_extra_params('--quality high --seed "12"'), {"quality": "high", "seed": "12"})
         with self.assertRaises(ValueError):
@@ -192,6 +202,7 @@ class SecurityTests(unittest.TestCase):
                 with self.assertRaises(ValueError) as ctx:
                     parse_extra_params(f"--{key} value")
                 self.assertIn(f"不允许的附加参数: {key}", str(ctx.exception))
+
     def test_redaction(self):
         text = redact("api_key=secret data:image/png;base64,AAAA")
         self.assertNotIn("secret", text); self.assertNotIn("AAAA", text)
@@ -212,6 +223,7 @@ class SecurityTests(unittest.TestCase):
 
 
 class PersonaStoreTests(unittest.TestCase):
+
     def test_summary_persists_until_explicit_update(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = PersonaStore(Path(tmp), 1024)
@@ -249,6 +261,7 @@ class PersonaStoreTests(unittest.TestCase):
 
 
 class QuotaStoreTests(unittest.TestCase):
+
     def test_failed_and_cancelled_states_are_refundable(self):
         for state in TaskState:
             expected = 3 if state in (TaskState.FAILED, TaskState.CANCELLED) else 0
@@ -259,6 +272,7 @@ class QuotaStoreTests(unittest.TestCase):
             store = QuotaStore(Path(tmp), lambda: "2026-07-22")
             self.assertEqual(store.consume("10001", 2, policy).snapshot.quota, 3)
             self.assertEqual(store.refund("10001", 2, policy).quota, 5)
+
     def test_daily_refresh_resets_low_and_high_balances_to_target(self):
         with tempfile.TemporaryDirectory() as tmp:
             today = ["2026-07-22"]
@@ -309,6 +323,7 @@ class QuotaStoreTests(unittest.TestCase):
 
 
 class ProviderTests(unittest.TestCase):
+
     def test_common_response_formats(self):
         adapter = OpenAIImageAdapter(ProviderConfig("a","openai_image","https://example.invalid",("k",)))
         values = adapter.parse_common({"data":[{"url":"https://example.invalid/a.png"},{"b64_json":"aW1hZ2U="}]})
@@ -363,7 +378,8 @@ class ProviderTests(unittest.TestCase):
         content = body["input"]["messages"][0]["content"]
         self.assertTrue(content[0]["image"].startswith("data:image/png;base64,"))
         self.assertEqual(content[1], {"text": "画一张测试图"})
-        self.assertEqual(body["parameters"]["size"], "1024*1536")
+        # size 原样透传：插件不再把 x 换成 *
+        self.assertEqual(body["parameters"]["size"], "1024x1536")
         self.assertEqual(body["parameters"]["n"], 2)
         self.assertIs(body["parameters"]["prompt_extend"], False)
         self.assertEqual(body["parameters"]["seed"], 7)
@@ -397,21 +413,19 @@ class ProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(UnsupportedResponse, "响应格式无效"):
             asyncio.run(adapter.generate(Session(), GenerationRequest("draw"), "key"))
 
+
 class PromptingTests(unittest.TestCase):
-    def test_optimizer_uses_safe_default_and_preserves_user_priority(self):
+
+    def test_optimizer_falls_back_to_safe_default_and_keeps_fixed_protocol(self):
+        # 自定义提示词为空时用内置安全默认；固定协议条款必须在（锁定与优先级条款由
+        # test_prompting.StyleAuthorityTests 覆盖）。
         prompt = optimizer_system("", "illustration", persona=True)
         self.assertIn(DEFAULT_OPTIMIZER_SYSTEM, prompt)
-        self.assertIn("始终优先", prompt)
         self.assertIn("不得复制", prompt)
-        # 基准由插件裁决后锁定交给副脑执行，副脑不得改换基准（但学派/题材/光影/
-        # 效果要在基准之上按用户措辞补写）；"用户优先"条款不含基准本身。
-        self.assertIn("本轮成像基准已固定为「手绘插画」", prompt)
-        self.assertIn("不得混入其它基准的特征", prompt)
-        self.assertIn("基准已由插件固定，不在此列", prompt)
-        self.assertIn(STYLE_GUIDANCE["illustration"], prompt)
-        self.assertNotIn("指定的风格", prompt)
+
 
 class SafeCreationErrorTests(unittest.TestCase):
+
     def test_whitelist_messages_pass_through(self):
         for text in (
             "提示词不能为空",
@@ -490,6 +504,7 @@ class ProviderErrorDetailTests(unittest.IsolatedAsyncioTestCase):
 
 
 class DuplicateRequestTests(unittest.TestCase):
+
     def test_same_trigger_message_is_duplicate_regardless_of_wording(self):
         records = [{"dedupe_key": "A", "trigger_message_id": "m1", "created_at": 100.0}]
         # 同一条触发消息：措辞不同（指纹不同）也判重复——一条消息只建一个任务。

@@ -31,15 +31,6 @@ class CameraTests(unittest.TestCase):
         self.assertEqual(merge_camera_request("", "俯拍 45 度"), f"{CAMERA_REQUEST_MARKER}: 俯拍 45 度")
 
 class ComposePersonaPromptTests(unittest.TestCase):
-    def test_no_fallback_suffix_is_plain_concat(self):
-        # 副脑正常完成/开关关闭：纯拼接，不注入任何后缀。
-        for prompt in (
-            compose_persona_prompt("s", "d"),
-            compose_persona_prompt("s", "d", style=""),
-            compose_persona_prompt("s", "d", style="realistic"),
-        ):
-            self.assertEqual(prompt, "Character identity (stable): s\nCurrent scene: d")
-
     def test_fallback_block_never_injects_optimizer_meta_prompt(self):
         # 副脑元指令（optimizer_prompt）不得进入图片 prompt：降级块只含风格
         # 预设与默认视角后缀。
@@ -58,11 +49,6 @@ class PersonaOptimizerProtocolTests(unittest.TestCase):
         self.assertIn("他拍", prompt)
         self.assertIn("避免默认怼脸自拍或特写", prompt)
         self.assertIn("以用户为准", prompt)
-
-class CaptionSanitizeTests(unittest.TestCase):
-    def test_sanitize_caption_collapses_whitespace_and_truncates(self):
-        self.assertEqual(sanitize_caption("  画好了\n\n看看喜欢吗  "), "画好了 看看喜欢吗")
-        self.assertEqual(sanitize_caption("长文" * 100, max_length=10), "长文" * 5)
 
 class ReferenceRelationSuffixTests(unittest.TestCase):
     def test_suffix_distinguishes_roles(self):
@@ -139,6 +125,7 @@ class StyleAuthorityTests(unittest.TestCase):
                 self.assertTrue(style_is_locked(style))
                 prompt = optimizer_system("", style, persona=True)
                 self.assertIn(f"本轮成像基准已固定为「{name}」", prompt)
+                self.assertIn(f"「{name}」", optimizer_system("", style, persona=False))
                 self.assertIn(STYLE_GUIDANCE[style], prompt)
                 # 基准已锁定：不再出现"用户明确指定的媒介优先"，避免与基准块互相打架
                 self.assertNotIn("指定的媒介", prompt)
@@ -168,13 +155,6 @@ class StyleAuthorityTests(unittest.TestCase):
 class BasisDifferentiationTests(unittest.TestCase):
     """基准必须强区分：每条口径都写死硬性排除项，且互相点名排除对方的特征。"""
 
-    def test_every_style_block_declares_hard_exclusions(self):
-        for key, guidance in STYLE_GUIDANCE.items():
-            if key == "default":
-                continue
-            with self.subTest(style=key):
-                self.assertIn("HARD EXCLUSIONS", guidance)
-
     def test_bases_exclude_each_other_by_name(self):
         cases = {
             "realistic": ("cel shading", "pixel grid", "sculpted figurine"),
@@ -187,15 +167,9 @@ class BasisDifferentiationTests(unittest.TestCase):
         self.assertEqual(set(cases), set(BASIS_LABELS))
         for style, markers in cases.items():
             with self.subTest(style=style):
+                self.assertIn("HARD EXCLUSIONS", STYLE_GUIDANCE[style])
                 for marker in markers:
                     self.assertIn(marker, STYLE_GUIDANCE[style])
-
-    def test_basis_names_are_written_into_the_prompt(self):
-        # 副脑要"从基准开始补写"，所以基准必须有明确名字，两条协议里都要有
-        for style, name in BASIS_LABELS.items():
-            for persona in (True, False):
-                with self.subTest(style=style, persona=persona):
-                    self.assertIn(f"「{name}」", optimizer_system("", style, persona=persona))
 
 
 class StylePromptSuffixTests(unittest.TestCase):

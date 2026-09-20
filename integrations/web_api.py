@@ -217,7 +217,7 @@ class PageAPI:
                     "model": str(item.get("model", "")).strip(),
                     "reference_image_limit": max(0, int(item.get("reference_image_limit", 0) or 0)),
                     "available_models": [str(value).strip() for value in (item.get("available_models", []) or []) if str(value).strip()],
-                    "default_size": str(item.get("default_size", "1024x1024")).strip() or "1024x1024",
+                    "default_size": str(item.get("default_size", "1024x1024")).strip(),
                     "timeout": max(10, int(item.get("timeout", 180) or 180)),
                     # AstrBot 管理页校验 template_list 要求条目带模板键；
                     # WebUI 保存同样带上，保证两种 UI 数据互相兼容。

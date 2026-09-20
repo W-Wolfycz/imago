@@ -22,6 +22,7 @@ from imago.core.errors import ReferenceImageError
 from imago.core.models import GenerationRequest, ImageInput, ProviderConfig
 from imago.core.network import detect_image_mime, fetch_reference
 from imago.core.references import ReferencePlanner, quoted_reply_missing_images
+from imago.providers.custom import CustomEndpointAdapter
 from imago.providers.openai_image import OpenAIImageAdapter
 
 PNG = b"\x89PNG\r\n\x1a\n" + bytes(24)
@@ -267,6 +268,99 @@ class OpenAIImageEditsFieldTests(unittest.TestCase):
         self.assertEqual(image_field[1], b"image")
         self.assertEqual(image_field[2], "ref.png")
         self.assertEqual(image_field[3], "image/png")
+
+class ImageSizePassthroughTests(unittest.TestCase):
+    """size 只透传：留空时不发送该字段，其它写法原样带上（含比例串与 * 写法）。"""
+
+    class _Response:
+        status = 200
+
+        async def json(self, content_type=None):
+            return {"data": [{"url": "https://example.invalid/result.png"}]}
+
+    class _RequestContext:
+        async def __aenter__(self): return ImageSizePassthroughTests._Response()
+
+        async def __aexit__(self, *_args): return False
+
+    def _capture(self, *, request_size, default_size, with_references=True):
+        captured = []
+
+        class FakeFormData:
+            def __init__(self): self.fields = []
+
+            def add_field(self, name, value, filename=None, content_type=None):
+                self.fields.append((name, value))
+
+        class Session:
+            def post(self, url, headers=None, data=None, json=None, **kwargs):
+                captured.append({"url": url, "json": json, "form": data})
+                return ImageSizePassthroughTests._RequestContext()
+
+        adapter = OpenAIImageAdapter(ProviderConfig(
+            "node", "openai_image", "https://example.invalid/v1", ("key",), model="model",
+            default_size=default_size,
+        ))
+        references = [ImageInput(b"i", "image/png")] if with_references else []
+        with patch.dict(sys.modules, {"aiohttp": type("M", (), {"FormData": FakeFormData})}):
+            asyncio.run(adapter.generate(
+                Session(), GenerationRequest("draw", size=request_size, references=references), "key",
+            ))
+        return captured[0]
+
+    def test_empty_size_is_omitted(self):
+        # 留空 = 不指定：请求体里不能出现 size（空字符串会被上游当非法参数）
+        form_case = self._capture(request_size="", default_size="", with_references=True)
+        self.assertTrue(form_case["url"].endswith("/images/edits"))
+        self.assertNotIn("size", [name for name, _ in form_case["form"].fields])
+        json_case = self._capture(request_size="", default_size="", with_references=False)
+        self.assertTrue(json_case["url"].endswith("/images/generations"))
+        self.assertNotIn("size", json_case["json"])
+
+    def test_values_pass_through_untouched(self):
+        # x 写法、* 写法、比例串、auto、越界值都原样发送，不做任何换算
+        for value in ("auto", "1024x1024", "1024*1024", "1:1", "3:4", "2048x2048"):
+            with self.subTest(value=value):
+                captured = self._capture(request_size=value, default_size="auto")
+                self.assertEqual(dict(captured["form"].fields)["size"], value)
+
+    def test_default_size_used_when_request_has_none(self):
+        captured = self._capture(request_size="", default_size="3:4")
+        self.assertEqual(dict(captured["form"].fields)["size"], "3:4")
+
+
+class CustomAdapterSizeTests(unittest.TestCase):
+    def _payload(self, *, request_size, default_size):
+        captured = []
+
+        class Response:
+            status = 200
+
+            async def json(self, content_type=None):
+                return {"data": [{"url": "https://example.invalid/r.png"}]}
+
+        class RequestContext:
+            async def __aenter__(self): return Response()
+
+            async def __aexit__(self, *_args): return False
+
+        class Session:
+            def post(self, url, headers=None, json=None, **kwargs):
+                captured.append(json)
+                return RequestContext()
+
+        adapter = CustomEndpointAdapter(ProviderConfig(
+            "c", "custom_endpoint", "https://example.invalid", ("k",), model="m",
+            default_size=default_size,
+        ))
+        asyncio.run(adapter.generate(Session(), GenerationRequest("draw", size=request_size), "k"))
+        return captured[0]
+
+    def test_empty_size_key_absent_and_values_preserved(self):
+        self.assertNotIn("size", self._payload(request_size="", default_size=""))
+        self.assertEqual(self._payload(request_size="1*1", default_size="")["size"], "1*1")
+        self.assertEqual(self._payload(request_size="", default_size="auto")["size"], "auto")
+
 
 class FetchReferenceRedirectTests(unittest.IsolatedAsyncioTestCase):
     """HTTP(S) 重定向 SSRF 加固的行为级测试（IP 字面量，无需 DNS/网络）。"""

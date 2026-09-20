@@ -181,6 +181,21 @@ DEBUG 会记录阶段、节点和具体模型、成功/失败、参考图数量�
 
 响应使用 `{"data":[{"url":"..."}]}` 或 `{"data":[{"b64_json":"..."}]}`。`parameters` 只接受用户通过 `--key value` 传入的值。
 
+## 图片尺寸怎么填（`default_size` / `size` 参数）
+
+插件的立场是**只设置、不解释**：`size` 不做校验、不做换算，写什么就原样发给上游（百炼节点也一样，要星号请自己写 `1024*1024`）。
+
+| 写法 | 含义 |
+| --- | --- |
+| `1024x1024` / `1024*1024` | 像素尺寸（`x` 小写；`*` 写法用于百炼） |
+| `1:1`、`3:4`、`16:9` | 比例串——支持的站点会按该比例出图 |
+| `auto` | 交给上游自选 |
+| 留空 | 不指定：请求里不发送 `size` 字段 |
+
+节点里的 `default_size` 是「用户/主 LLM 没给尺寸时用哪个」（留空 = 不指定），工具传入的 `size` 优先于它。越界或上游不认的值不会被插件纠正，可能被上游报错，或按它自己的尺寸处理。
+
+两点实测提醒（new-api 中转站 + `gpt-image-2`）：方形像素尺寸可能被上游吸附到它自己的原生边长（要 `1024x1024` 可能给 1254×1254），比例串与横竖尺寸按你给的值出图；`size` 走像素计费，越大越贵（`2048x2048` 约为方形的 2.6 倍）。另外 `aspect_ratio` 字段在走 images 接口的中转站会被丢弃——比例要写进 `size`。
+
 ## `dashscope_multimodal`
 
 ```text
@@ -190,7 +205,7 @@ model: qwen-image-3.0-pro
 default_size: 1024x1024
 ```
 
-Base URL 必须是同地域、可直接 POST 的完整 generation URL。插件会构造单轮 `input.messages`，把尺寸中的 `x` 转成 `*`，默认开启 `prompt_extend`，并支持 `negative_prompt`、`seed`、`watermark` 等 `extra_params`。
+Base URL 必须是同地域、可直接 POST 的完整 generation URL。插件会构造单轮 `input.messages`，`size` 原样发送（需要 `*` 就自己写 `1024*1024`），默认开启 `prompt_extend`，并支持 `negative_prompt`、`seed`、`watermark` 等 `extra_params`。
 
 插件不按模型名写死图片数量或大小能力。参考图数量由节点的 `reference_image_limit` 控制，用户明确附图不会被静默删除；模型自身限制由百炼响应决定。百炼错误会保留脱敏后的 `code/message` 并进入可用的模型/节点 fallback。
 

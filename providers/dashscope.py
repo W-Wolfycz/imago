@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import re
 from typing import Any
 
 from .base import ProviderAdapter
@@ -15,10 +14,6 @@ _INTEGER_PARAMS = {"seed"}
 
 def _data_url(mime_type: str, data: bytes) -> str:
     return f"data:{mime_type};base64,{base64.b64encode(data).decode()}"
-
-
-def _normalize_size(value: str) -> str:
-    return re.sub(r"[xX×]", "*", value.strip())
 
 
 def _parameter_value(key: str, value: str) -> Any:
@@ -58,9 +53,10 @@ class DashScopeMultimodalAdapter(ProviderAdapter):
             "prompt_extend": True,
             "n": request.count,
         }
+        # size 原样透传（不换算 x→*）：需要星号的模型请在配置或参数里直接写 1024*1024
         size = request.size or self.config.default_size
         if size:
-            parameters["size"] = _normalize_size(size)
+            parameters["size"] = size
         for key, value in request.extra_params.items():
             if key not in {"n", "size"}:
                 parameters[key] = _parameter_value(key, value)

@@ -14,7 +14,9 @@ class OpenAIImageAdapter(ProviderAdapter):
         size = request.size or self.config.default_size
         if not request.references:
             url = urljoin(self.config.base_url.rstrip("/") + "/", "images/generations")
-            payload = {"model": model, "prompt": request.prompt, "n": request.count, "size": size, **request.extra_params}
+            payload = {"model": model, "prompt": request.prompt, "n": request.count, **request.extra_params}
+            if size:  # 留空/未指定：不发送该字段，交给上游
+                payload["size"] = size
             async with session.post(url, headers={**headers, "Content-Type": "application/json"}, json=payload) as response:
                 return self.parse_common(await self.response_json(response))
         url = urljoin(self.config.base_url.rstrip("/") + "/", "images/edits")
@@ -22,7 +24,8 @@ class OpenAIImageAdapter(ProviderAdapter):
         form.add_field("model", model)
         form.add_field("prompt", request.prompt)
         form.add_field("n", str(request.count))
-        form.add_field("size", size)
+        if size:
+            form.add_field("size", size)
         for key, value in request.extra_params.items():
             form.add_field(key, value)
         for index, image in enumerate(request.references):

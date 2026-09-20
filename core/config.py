@@ -74,7 +74,8 @@ def load_config(raw: Mapping[str, Any]) -> RuntimeConfig:
             model=str(item.get("model", "")).strip(),
             available_models=tuple(str(v) for v in (item.get("available_models", []) or [])),
             reference_image_limit=max(0, int(item.get("reference_image_limit", 0) or 0)),
-            default_size=str(item.get("default_size", "1024x1024")).strip() or "1024x1024",
+            # 留空是合法配置（等同"不指定"：请求里不发送 size 字段），不做兜底替换。
+        default_size=str(item.get("default_size", "1024x1024")).strip(),
             timeout=max(10, int(item.get("timeout", 180) or 180)),
         ))
     optimizer = raw.get("optimizer_config", {}) or {}
