@@ -225,7 +225,7 @@ class Imago(Star):
     def _log_prefix(self, event=None):
         if load_config(self.raw_config).log_with_bot_id and event is not None:
             try:
-                return f"[Imago:{event.get_platform_id()}]"
+                return f"[Imago][platform:{event.get_platform_id()}]"
             except Exception:
                 pass
         return "[Imago]"
@@ -1657,7 +1657,7 @@ class Imago(Star):
         当用户当前消息明确提出新生成、绘制、改图或重绘一张图片，且当前会话 Persona 本人不需要出现在画面中时，必须调用本工具。
         不要只用文字描述成图、假装已经画好，或在未成功创建任务时声称稍后会发图。历史中已经创建过、正在处理的画面绝对不要重复调用本工具：同一条用户消息里重复调用会被忽略，用户另发消息重复提交仍会再次扣费并生成重复图片，工具只负责创建任务，图片会由插件后台完成后另行发送。
 
-        适用于场景、物品、海报、非当前会话 Persona 角色或其他普通图片。
+        适用于场景、物品、海报/报纸/截图这类载体画面、非当前会话 Persona 角色或其他普通图片。
         当前会话 Persona 本人需要出镜时应改用 generate_persona_image。
         用户只是讨论、评价或询问已有图片时不要调用。
         用户当前消息、引用消息及消息正文中可访问的 HTTP/HTTPS 图片会自动作为本轮参考图；
@@ -1672,7 +1672,7 @@ class Imago(Star):
             aspect_ratio(string): 可选宽高比，如 1:1、16:9。
             size(string): 可选尺寸；用户明确要求时才填，可填像素尺寸（1024x1024）或比例（1:1、3:4、16:9），插件原样透传、不做换算，拿不准就留空（不发送 size 字段，交图片模型自选）。
             extra_params(string): 只能填写用户明确提供的 --key value 参数；用户没有指定时留空。
-            style(string): 仅在能明显判断成图由什么材质构成时填写：realistic(真人实拍)、real3d(照片级三维渲染：产品商品/静物/手办摆件/模型等非人写实)、cg3d(风格化三维渲染：三维动画、游戏 CG)、illustration(手绘插画)、pixel(像素阵列)、logo(LOGO 设计：扁平矢量标志/标识)；无法明显判断时传 auto 或留空，不要猜。学派（日系/美漫/厚涂/水墨）、题材（赛博朋克/国风等）、效果（朦胧/胶片/黑白等）、形态（手办化等）不要塞进本参数，直接写进 prompt。
+            style(string): 仅在能明显判断成图由什么材质构成时填写：realistic(真人实拍)、real3d(照片级三维渲染：产品商品/静物/手办潮玩/模型/数字人等)、cg3d(风格化三维渲染：三维动画、游戏 CG)、illustration(手绘插画)、pixel(像素阵列)、logo(LOGO 设计：扁平矢量标志/标识)；无法明显判断时传 auto 或留空，不要猜。学派（日系/美漫/厚涂/水墨）、题材（赛博朋克/国风等）、效果（朦胧/胶片/黑白等）、形态（商品展示/分镜/贴纸，以及聊天记录/报纸/海报这类载体画面）不要塞进本参数，直接写进 prompt。
         """
         try:
             await self._submit(event, prompt, count=count, aspect_ratio=aspect_ratio, size=size, extra_params=extra_params, style=style, plain_draw_tool=True)
@@ -1711,7 +1711,7 @@ class Imago(Star):
             size(string): 可选尺寸；用户明确要求时才填，可填像素尺寸（1024x1024）或比例（1:1、3:4、16:9），插件原样透传、不做换算，拿不准就留空（不发送 size 字段，交图片模型自选）。
             extra_params(string): 只能填写用户明确提供的 --key value 参数；用户没有指定时留空。
             camera(string): 可选。仅当用户本轮明确要求自拍、特写或指定机位/视角时填写（如“自拍”“怼脸”“俯拍 45 度”）；留空表示用户未指定视角，插件默认采用自然第三方视角（他拍观感）。非空时会以 Camera request 明确标记并入 action。
-            style(string): 仅在能明显判断成图由什么材质构成时填写：realistic(真人实拍)、real3d(照片级三维渲染：产品商品/静物/手办摆件/模型等非人写实)、cg3d(风格化三维渲染：三维动画、游戏 CG)、illustration(手绘插画)、pixel(像素阵列)、logo(LOGO 设计：扁平矢量标志/标识)；无法明显判断时传 auto 或留空，不要猜。学派（日系/美漫/厚涂/水墨）、题材（赛博朋克/国风等）、效果（朦胧/胶片/黑白等）、形态（手办化等）不要塞进本参数，直接写进 prompt。
+            style(string): 仅在能明显判断成图由什么材质构成时填写：realistic(真人实拍)、real3d(照片级三维渲染：产品商品/静物/手办潮玩/模型/数字人等)、cg3d(风格化三维渲染：三维动画、游戏 CG)、illustration(手绘插画)、pixel(像素阵列)、logo(LOGO 设计：扁平矢量标志/标识)；无法明显判断时传 auto 或留空，不要猜。学派（日系/美漫/厚涂/水墨）、题材（赛博朋克/国风等）、效果（朦胧/胶片/黑白等）、形态（商品展示/分镜/贴纸，以及聊天记录/报纸/海报这类载体画面）不要塞进本参数，直接写进 prompt。
         """
         action = merge_camera_request(action, camera)
         try:

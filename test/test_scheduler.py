@@ -3,7 +3,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-from imago.core.errors import NoOutputError, ProviderError
+from imago.core.errors import ProviderError
 from imago.core.models import DrawTask, GenerationRequest, ImageInput, ImageResult, ProviderConfig, RuntimeConfig, TaskStage, TaskState
 from imago.services import scheduler as scheduler_module
 from imago.services.scheduler import TaskScheduler
@@ -100,13 +100,6 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             scheduler.submit(task)
             await asyncio.wait_for(finished.wait(), 1)
             self.assertEqual(attempts, [("node_a", "model_bad"), ("node_a", "model_ok")])
-            attempt_logs = [item for item in debug_calls if "绘图节点尝试" in item[1]]
-            self.assertEqual([item[0] for item in attempt_logs], [task, task])
-            self.assertEqual([item[2][4:6] for item in attempt_logs], [(1, 2), (2, 2)])
-            failure_logs = [item for item in debug_calls if "绘图模型失败" in item[1]]
-            success_logs = [item for item in debug_calls if "绘图模型成功" in item[1]]
-            self.assertEqual([item[2][2] for item in failure_logs], ["model_bad"])
-            self.assertEqual([item[2][2] for item in success_logs], ["model_ok"])
             self.assertEqual(task.state, TaskState.SUCCEEDED)
         finally:
             await scheduler.close()

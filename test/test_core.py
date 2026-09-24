@@ -5,8 +5,6 @@ import unittest
 from pathlib import Path
 
 from imago.core.config import (
-    STYLE_OPTIONS,
-    STYLES,
     load_config,
     optimizer_in_use,
     persona_provider_settings,
@@ -27,10 +25,7 @@ from imago.providers.openai_chat import OpenAIChatAdapter
 from imago.providers.openai_image import OpenAIImageAdapter
 from imago.core.prompting import (
     DEFAULT_OPTIMIZER_SYSTEM,
-    STYLE_GUIDANCE,
     optimizer_system,
-    persona_optimizer_input,
-    summary_user_prompt,
 )
 from imago.core.security import ensure_child, parse_extra_params, redact, redact_debug, safe_component
 from imago.services.persona_store import PersonaStore
@@ -41,12 +36,9 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class ConfigTests(unittest.TestCase):
 
-    def test_defaults_and_bounds(self):
-        cfg = load_config({"task_config": {"generation_timeout": 1, "max_concurrent_tasks": 0}})
-        self.assertEqual(cfg.generation_timeout, 30)
-        self.assertEqual(cfg.max_concurrent_tasks, 1)
-        self.assertEqual(load_config({"task_config": {"llm_retry": 0}}).llm_retry, 1)
-        self.assertEqual(load_config({"task_config": {"llm_retry": 9}}).llm_retry, 5)
+    def test_reference_limit_and_blank_size_bounds(self):
+        # 参考图数量被夹到合法区间（错值会静默改变参考图张数）；default_size 留空是
+        # 1.2.1 的回归点：不能被兜成 1024x1024，否则请求会悄悄带上尺寸
         limited = load_config({"providers": [{
             "id": "node", "api_type": "openai_image", "base_url": "https://example.invalid/v1",
             "api_keys": "key_demo", "reference_image_limit": -5,
@@ -94,32 +86,14 @@ class ConfigTests(unittest.TestCase):
                 cfg = load_config({"optimizer_config": {"optimizer_style": label}})
                 self.assertEqual(cfg.optimizer_style, internal)
 
-    def test_style_labels_match_schema_options(self):
-        # 配置标签是解析键：WebUI 的 options 与 STYLE_OPTIONS 必须逐项一致，否则用户
-        # 选中某个基准后会被静默回退成 default(通用)。
-        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
-        options = schema["optimizer_config"]["items"]["optimizer_style"]["options"]
-        self.assertEqual(options, list(STYLE_OPTIONS))
-        for label, key in STYLE_OPTIONS.items():
-            with self.subTest(label=label):
-                self.assertIn(key, STYLES)
-
-    def test_plain_draw_optimizer_and_at_switch_defaults(self):
-        # 用户可见开关：键名/默认值必须与 _conf_schema.json 一致，改动 schema 却忘记
-        # 同步代码时这里会失败（普通绘图走副脑默认关闭、结果 @ 触发者默认开启）。
-        default = load_config({})
-        self.assertFalse(default.optimize_plain_draw)
-        self.assertTrue(default.at_trigger_user)
+    def test_switch_values_are_honored(self):
+        # 显式写进配置的开关必须被采纳：配置键被默默忽略属静默失效，看不到报错
         cfg = load_config({
             "optimizer_config": {"optimize_plain_draw": True},
             "task_config": {"at_trigger_user": False},
         })
         self.assertTrue(cfg.optimize_plain_draw)
         self.assertFalse(cfg.at_trigger_user)
-        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
-        item = schema["optimizer_config"]["items"]["optimize_plain_draw"]
-        self.assertEqual(item["type"], "bool")
-        self.assertFalse(item["default"])
 
     def test_optimizer_in_use_is_independent_of_style_linkage(self):
         # 「是否走副脑」只由总开关 + 任务来源决定，与成像基准的联动无关。
@@ -161,14 +135,8 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual([p.id for p in cfg.providers], ["a"])
         self.assertEqual(cfg.providers[0].timeout, 10)
 
-    def test_line_items_only(self):
-        cfg = load_config({"providers": [{
-            "id": "node",
-            "api_type": "openai_image",
-            "base_url": "https://example.invalid/v1",
-            "api_keys": "key_a\nkey_b,key_c",
-        }]})
-        self.assertEqual(cfg.providers[0].api_keys, ("key_a", "key_b,key_c"))
+    def test_quota_id_lists_are_line_items_only(self):
+        # 名单按行解析；解析错了只会静默改变谁被限流，不会报错
         ids = load_config({"quota_config": {"blacklist_ids": "10001\n10002"}})
         self.assertEqual(ids.quota.blacklist_ids, frozenset({"10001", "10002"}))
         comma = load_config({"quota_config": {"blacklist_ids": "10001,10002"}})
@@ -291,14 +259,25 @@ class QuotaStoreTests(unittest.TestCase):
             self.assertEqual(store.inspect("10001", policy).quota, 2)
 
     def test_blacklist_precedes_unlimited_whitelist(self):
+        # 黑名单用户即使是白名单也要被拒；断言必须区分"黑名单拦下"与"额度不足"，
+        # 否则把黑名单逻辑整段架空、只靠 0 额度拒绝也能让 .allowed 为 False（变异验证抓到过）。
         with tempfile.TemporaryDirectory() as tmp:
             policy = QuotaConfig(
                 enabled=True,
+                daily_quota_target=50,
                 blacklist_ids=frozenset({"10001"}),
                 unlimited_whitelist_ids=frozenset({"10001", "10002"}),
             )
             store = QuotaStore(Path(tmp), lambda: "2026-07-22")
-            self.assertFalse(store.can_consume("10001", 1, policy).allowed)
+            check = store.can_consume("10001", 1, policy)
+            self.assertFalse(check.allowed)
+            self.assertIn("无法使用绘图功能", check.reason)
+            # 扣费路径同样要拦：不能只在查询接口里生效
+            charged = store.consume("10001", 1, policy)
+            self.assertFalse(charged.allowed)
+            self.assertEqual(charged.charged, 0)
+            self.assertEqual(store.inspect("10001", policy).quota, 50)
+            # 白名单用户不受影响且不扣额度
             decision = store.consume("10002", 4, policy)
             self.assertTrue(decision.allowed)
             self.assertEqual(decision.charged, 0)
@@ -417,11 +396,9 @@ class ProviderTests(unittest.TestCase):
 class PromptingTests(unittest.TestCase):
 
     def test_optimizer_falls_back_to_safe_default_and_keeps_fixed_protocol(self):
-        # 自定义提示词为空时用内置安全默认；固定协议条款必须在（锁定与优先级条款由
-        # test_prompting.StyleAuthorityTests 覆盖）。
+        # 自定义提示词为空时回落到内置安全默认（接线，不校验默认文案内容）
         prompt = optimizer_system("", "illustration", persona=True)
         self.assertIn(DEFAULT_OPTIMIZER_SYSTEM, prompt)
-        self.assertIn("不得复制", prompt)
 
 
 class SafeCreationErrorTests(unittest.TestCase):

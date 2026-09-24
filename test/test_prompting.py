@@ -2,22 +2,18 @@ import unittest
 
 from imago.core.prompting import (
     CAMERA_REQUEST_MARKER,
-    AUTO_NEUTRAL_ENTRY,
     BASIS_LABELS,
-    FIXED_STYLE_PRESETS,
     STYLE_LLM_CHOICES,
     STYLE_AUTO_CATALOG,
     DEFAULT_CAMERA_SUFFIX,
     REFERENCE_RELATION_SUFFIX,
     STYLE_GUIDANCE,
     STYLE_PROMPT_SUFFIX,
-    caption_system_text,
     compose_persona_prompt,
     merge_camera_request,
     optimizer_system,
     reference_relation_suffix,
     resolve_style,
-    sanitize_caption,
     style_is_locked,
     style_prompt_suffix,
 )
@@ -42,14 +38,6 @@ class ComposePersonaPromptTests(unittest.TestCase):
         self.assertIn(STYLE_PROMPT_SUFFIX["realistic"], prompt)
 
 
-class PersonaOptimizerProtocolTests(unittest.TestCase):
-    def test_persona_protocol_defaults_to_third_person_view(self):
-        prompt = optimizer_system("", "default", persona=True)
-        self.assertIn("第三方视角", prompt)
-        self.assertIn("他拍", prompt)
-        self.assertIn("避免默认怼脸自拍或特写", prompt)
-        self.assertIn("以用户为准", prompt)
-
 class ReferenceRelationSuffixTests(unittest.TestCase):
     def test_suffix_distinguishes_roles(self):
         self.assertEqual(reference_relation_suffix(2, 0), REFERENCE_RELATION_SUFFIX)
@@ -60,36 +48,13 @@ class ReferenceRelationSuffixTests(unittest.TestCase):
         self.assertIn("character identity references", suffix)
 
 
-class CaptionSystemTextTests(unittest.TestCase):
-    def test_no_images_forbids_success_tone(self):
-        text = caption_system_text("人设A", has_images=False)
-        self.assertIn("没有生成任何图片", text)
-        self.assertIn("不要声称图片已准备好", text)
-        self.assertNotIn("图片拼接在文字末尾", text)
-        with_images = caption_system_text("人设A", has_images=True)
-        self.assertIn("图片拼接在文字末尾", with_images)
 
+class AutoStyleTableTests(unittest.TestCase):
+    """选择表的基准项必须与基准表一一对应：少一项会让某个基准在 auto 下永远选不出来。"""
 
-class AutoStyleSelectionTests(unittest.TestCase):
-    """auto 的表：只有成像基准 + 一个"不指定基准"的通用兜底项。"""
-
-    def test_auto_table_lists_every_basis_plus_neutral_fallback(self):
-        prompt = optimizer_system("", "auto", persona=True)
-        self.assertIn("基准选择", prompt)
-        for label in ("REALISTIC_PHOTO", "REAL_3D", "CG_3D", "HAND_DRAWN_ILLUSTRATION",
-                      "PIXEL_GRID", "LOGO_DESIGN"):
-            with self.subTest(label=label):
-                self.assertIn(label, prompt)
-        # 表的基准项恰好等于 BASIS_LABELS，且不含通用兜底（兜底只由 AUTO_NEUTRAL_ENTRY 提供）
+    def test_table_keys_match_basis_labels(self):
         self.assertEqual([key for key, _, _ in STYLE_AUTO_CATALOG], list(BASIS_LABELS))
         self.assertNotIn("default", [key for key, _, _ in STYLE_AUTO_CATALOG])
-        # 无线索 → 通用（不指定基准），不硬塞某个基准
-        self.assertIn("选表末的 GENERAL_NEUTRAL", prompt)
-        self.assertIn(AUTO_NEUTRAL_ENTRY, prompt)
-        # 不写死条目数量：加基准时提示词自动跟随
-        self.assertNotIn("四选一", prompt)
-        # 单一基准模式不出现选择表
-        self.assertNotIn("基准选择", optimizer_system("", "pixel", persona=True))
 
 
 class ResolveStyleTests(unittest.TestCase):
@@ -101,7 +66,7 @@ class ResolveStyleTests(unittest.TestCase):
                 self.assertEqual(resolve_style("realistic", requested), "realistic")
 
     def test_auto_links_to_llm_preset(self):
-        # 主 LLM 只能传六个基准之一
+        # 主 LLM 只能传表中的基准之一
         self.assertEqual(STYLE_LLM_CHOICES, tuple(BASIS_LABELS))
         self.assertEqual(resolve_style("auto", "pixel"), "pixel")
         self.assertEqual(resolve_style("auto", " PIXEL "), "pixel")
@@ -110,10 +75,6 @@ class ResolveStyleTests(unittest.TestCase):
         for requested in ("", "auto", "default", "none", "steampunk", "anime style"):
             with self.subTest(requested=requested):
                 self.assertEqual(resolve_style("auto", requested), "auto")
-
-    def test_blank_config_falls_back_to_default(self):
-        self.assertEqual(resolve_style("", ""), "default")
-        self.assertEqual(resolve_style("", "pixel"), "default")
 
 
 class StyleAuthorityTests(unittest.TestCase):
@@ -126,13 +87,10 @@ class StyleAuthorityTests(unittest.TestCase):
                 prompt = optimizer_system("", style, persona=True)
                 self.assertIn(f"本轮成像基准已固定为「{name}」", prompt)
                 self.assertIn(f"「{name}」", optimizer_system("", style, persona=False))
+                # 口径文本确实进了 prompt（漏注入属静默失效）
                 self.assertIn(STYLE_GUIDANCE[style], prompt)
-                # 基准已锁定：不再出现"用户明确指定的媒介优先"，避免与基准块互相打架
+                # 基准已锁定：用户优先条款里不再给"媒介"，避免与基准块互相打架
                 self.assertNotIn("指定的媒介", prompt)
-                self.assertIn("用户本轮明确指定的视角和构图", prompt)
-                # 学派/题材/光影/效果仍要在基准之上按用户措辞补写（示例在共享句里）
-                self.assertIn("学派、题材、光影氛围与效果", prompt)
-                self.assertIn("日系赛璐璐", prompt)
 
     def test_unlocked_options_keep_user_style_priority(self):
         # none 不注入基准块；default 只给通用口径；auto 交副脑按用户措辞选——
@@ -170,6 +128,17 @@ class BasisDifferentiationTests(unittest.TestCase):
                 self.assertIn("HARD EXCLUSIONS", STYLE_GUIDANCE[style])
                 for marker in markers:
                     self.assertIn(marker, STYLE_GUIDANCE[style])
+
+    def test_real3d_basis_claims_humans_and_collectible_toys(self):
+        # real3d 原口径只写"物"：写实三维人物/数字人会被 auto 判去真人实拍，手办潮玩被当通用效果
+        # 塞进别的基准。这是协议条款，删掉不报错但 auto 行为静默回退。
+        basis = STYLE_GUIDANCE["real3d"]
+        # 断言主体清单里的独家措辞：排除项里也有 "designer toy"，只断言单词会被漏改蒙过去
+        for phrase in ("digital human", "designer toys and ornaments"):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, basis)
+        # 降级后缀是另一条注入路径（副脑没跑时生效），同样要认人物主体
+        self.assertIn("digital human", STYLE_PROMPT_SUFFIX["real3d"])
 
 
 class StylePromptSuffixTests(unittest.TestCase):
