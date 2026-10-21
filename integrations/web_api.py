@@ -6,7 +6,13 @@ from collections.abc import Mapping
 
 from quart import jsonify, request
 
-from ..core.config import load_config
+from ..core.config import (
+    TYPED_KEYS_BY_API,
+    load_config,
+    provider_custom_params,
+    split_custom_params,
+)
+from ..core.params import PARAM_FIELDS
 from ..core.errors import DuplicateImage
 
 
@@ -159,7 +165,8 @@ class PageAPI:
                 "available_models": [str(value) for value in (item.get("available_models", []) or [])],
                 "base_url": str(item.get("base_url", "")),
                 "api_keys_configured": has_keys,
-                "default_size": str(item.get("default_size", "1024x1024")),
+                "custom_params": "\n".join(
+                    f"{key}={value}" for key, value in provider_custom_params(item)),
                 "timeout": _safe_int(item.get("timeout"), 180, 10),
                 "complete": complete,
             })
@@ -177,6 +184,7 @@ class PageAPI:
         optimizer = self.plugin.raw_config.get("optimizer_config", {}) or {}
         return _ok(
             providers=configured,
+            param_fields=PARAM_FIELDS,
             primary_provider_id=effective,
             stored_primary_provider_id=primary,
             chat_providers=chat_providers,
@@ -204,11 +212,21 @@ class PageAPI:
                 if not provider_id or provider_id in seen:
                     return _err("节点 ID 不能为空或重复")
                 api_type = str(item.get("api_type", "")).strip()
-                if api_type not in {"openai_image", "openai_chat", "gemini_official", "dashscope_multimodal", "custom_endpoint"}:
+                if api_type not in {"openai_image", "xai_image", "gemini_official",
+                                     "custom_endpoint"}:
                     return _err(f"节点 {provider_id} 的接口类型无效")
                 old = old_by_id.get(provider_id, {})
                 submitted_keys = _line_items(item.get("api_keys", []))
                 stored_keys = _line_items(old.get("api_keys", []))
+                # 旧节点只有 default_size：没写自定义参数时把旧尺寸迁成 size=…，
+                # 避免用管理页（或旧版页面）保存一次就把默认尺寸丢掉。
+                custom_params = str(item.get("custom_params", "")).strip()
+                legacy_size = str(old.get("default_size", "") or "").strip()
+                if not custom_params and legacy_size:
+                    custom_params = f"size={legacy_size}"
+                # 控件字段单独落盘，其余键留在文本里（两种页面共用一份配置）
+                param_fields, extra_params = split_custom_params(
+                    custom_params, TYPED_KEYS_BY_API.get(api_type, ()))
                 saved.append({
                     "id": provider_id,
                     "api_type": api_type,
@@ -217,7 +235,14 @@ class PageAPI:
                     "model": str(item.get("model", "")).strip(),
                     "reference_image_limit": max(0, int(item.get("reference_image_limit", 0) or 0)),
                     "available_models": [str(value).strip() for value in (item.get("available_models", []) or []) if str(value).strip()],
-                    "default_size": str(item.get("default_size", "1024x1024")).strip(),
+                    "size": param_fields.get("size", ""),
+                    "quality_openai": param_fields.get("quality", "")
+                    if api_type == "openai_image" else "",
+                    "quality_xai": param_fields.get("quality", "")
+                    if api_type == "xai_image" else "",
+                    "nsfw": param_fields.get("nsfw", "").lower() in {"true", "1", "yes"}
+                    if api_type == "xai_image" else False,
+                    "custom_params": extra_params,
                     "timeout": max(10, int(item.get("timeout", 180) or 180)),
                     # AstrBot 管理页校验 template_list 要求条目带模板键；
                     # WebUI 保存同样带上，保证两种 UI 数据互相兼容。

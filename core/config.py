@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from typing import Any
 
 from .models import ProviderConfig, QuotaConfig, RuntimeConfig
 
-API_TYPES = {"openai_image", "openai_chat", "gemini_official", "dashscope_multimodal", "custom_endpoint"}
+API_TYPES = {
+    "openai_image",
+    "xai_image",
+    "gemini_official",
+    "custom_endpoint",
+}
 STYLES = {"none", "default", "realistic", "real3d", "cg3d", "illustration", "pixel", "logo", "auto"}
 STYLE_OPTIONS = {
     "None(无)": "none",
@@ -27,6 +33,103 @@ def _line_items(value: Any) -> tuple[str, ...]:
 
 def _keys(value: Any) -> tuple[str, ...]:
     return _line_items(value)
+
+
+# 自定义参数键名：与工具附加参数同一套规则，避免把任意 JSON 键名塞进请求体。
+CUSTOM_KEY = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,31}$")
+
+
+def parse_custom_params(value: Any) -> tuple[tuple[str, str], ...]:
+    """解析节点的「自定义参数」文本：每行一条 ``key=value``（也接受 ``key: value``）。
+
+    值保持原样字符串，类型还原交给适配器（JSON 标量按类型发送，表单按字符串发送）。
+    非法行、注释行（``#``）和重复键直接跳过——写错一行不该让整个节点失效，重复键保留
+    第一次出现的值。``size`` 也走这里，不再有单独的尺寸字段。
+    """
+    raw = value if isinstance(value, (list, tuple)) else str(value or "").splitlines()
+    items: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for line in raw:
+        text = str(line).strip()
+        if not text or text.startswith("#"):
+            continue
+        head, found, tail = "", "", ""
+        for separator in ("=", ":"):
+            head, found, tail = text.partition(separator)
+            if found:
+                break
+        key = head.strip()
+        if not found or not CUSTOM_KEY.fullmatch(key) or key in seen:
+            continue
+        seen.add(key)
+        items.append((key, tail.strip()))
+    return tuple(items)
+
+
+# 配置页直接提供的参数控件（值最终并入 custom_params）
+KNOWN_PARAM_KEYS = ("size", "quality", "nsfw")
+
+# 每个协议实际认哪些控件字段：其余字段即使写在配置里也忽略（例如 Gemini 的 quality）
+TYPED_KEYS_BY_API = {
+    "openai_image": ("size", "quality"),
+    "xai_image": ("size", "quality", "nsfw"),
+    "gemini_official": ("size",),
+    "custom_endpoint": ("size",),
+}
+
+# 配置页把质量拆成两个互斥字段（condition 只支持“等于”，这样 Gemini 才不会显示）
+QUALITY_KEYS = {"openai_image": "quality_openai", "xai_image": "quality_xai"}
+
+
+def _typed_value(item: Mapping[str, Any], api_type: str, key: str) -> Any:
+    if key == "quality":
+        specific = QUALITY_KEYS.get(api_type)
+        if specific and specific in item:
+            return item.get(specific)
+        return item.get("quality")
+    return item.get(key)
+
+
+def provider_custom_params(item: Mapping[str, Any]) -> tuple[tuple[str, str], ...]:
+    """节点的有效自定义参数：``custom_params`` 文本 + 配置页的 size/quality/nsfw 控件。
+
+    控件优先于文本（配置页保存的就是控件值），控件留空表示删除该键；旧 ``default_size``
+    在没有 size 时补成一条 size，兼容 1.2.x 配置。
+    """
+    params = dict(parse_custom_params(item.get("custom_params", "")))
+    api_type = str(item.get("api_type", "")).strip()
+    for key in TYPED_KEYS_BY_API.get(api_type, KNOWN_PARAM_KEYS):
+        value = _typed_value(item, api_type, key)
+        if value is None:
+            continue
+        text = "true" if value is True else "" if value is False else str(value or "").strip()
+        if text:
+            params[key] = text
+        else:
+            params.pop(key, None)
+    if "size" not in params:
+        legacy = str(item.get("default_size", "") or "").strip()
+        if legacy:
+            params["size"] = legacy
+    return tuple(params.items())
+
+
+def split_custom_params(
+    text: Any, keys: tuple[str, ...] = KNOWN_PARAM_KEYS,
+) -> tuple[dict[str, str], str]:
+    """把页面提交的 ``custom_params`` 文本拆成「控件字段」与「其余文本」。
+
+    只有该协议支持的键会被拆出来（``custom_endpoint`` 传空元组，全部留在文本里），
+    避免把用户手写的参数挪进该协议不认的控件字段后丢掉。
+    """
+    known: dict[str, str] = {}
+    rest: list[str] = []
+    for key, value in parse_custom_params(text):
+        if key in keys:
+            known[key] = value
+        else:
+            rest.append(f"{key}={value}")
+    return known, "\n".join(rest)
 
 
 def _ids(value: Any) -> frozenset[str]:
@@ -74,8 +177,7 @@ def load_config(raw: Mapping[str, Any]) -> RuntimeConfig:
             model=str(item.get("model", "")).strip(),
             available_models=tuple(str(v) for v in (item.get("available_models", []) or [])),
             reference_image_limit=max(0, int(item.get("reference_image_limit", 0) or 0)),
-            # 留空是合法配置（等同"不指定"：请求里不发送 size 字段），不做兜底替换。
-        default_size=str(item.get("default_size", "1024x1024")).strip(),
+            custom_params=provider_custom_params(item),
             timeout=max(10, int(item.get("timeout", 180) or 180)),
         ))
     optimizer = raw.get("optimizer_config", {}) or {}

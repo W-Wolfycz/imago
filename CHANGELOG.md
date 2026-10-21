@@ -1,5 +1,21 @@
 # 更新日志
 
+## 1.3.0 — 2026-10-22
+
+### 新增
+
+- **`xai_image` 接口类型**：xAI Grok Imagine 的文生图与改图。模型 ID 与私有参数都不写死——`model` 填服务商文档里的 Grok 型号（官方 `grok-imagine-image-2.0`，中转可能叫 `image-2`、`grok-imagine-2.0-ext` 等），`resolution`/`quality`/`nsfw`/`providerOptions` 等写进节点「自定义参数」，值按 JSON 类型原样发送。改图默认走官方 JSON 口径（单图 `image: {url}`、多图 `images: [{url}, …]`，url 用 base64 data URL，最多 5 张，提示词可用 `<IMAGE_0>` 指代）；只收 multipart 的中转用自定义参数 `edit_mode=multipart` 切换。比例同时发 `size` 与 `aspect_ratio`（不同站点认的字段不同），像素尺寸会约分成比例。
+- **节点参数按协议出控件**：插件页不再让用户手写请求参数，选中接口类型后只显示该协议支持的控件（三个协议都是「尺寸/比例 + 质量」，`xai_image` 多一个 NSFW 勾选框；尺寸是文本框，像素/比例/auto/留空四种写法都收；`custom_endpoint` 保留自由文本框）。存储仍是 `custom_params` 的 `key=value` 文本，旧配置里未识别的键会保留并提示、保存后照旧发送。
+### 变更
+
+- **节点配置改为「自定义参数」**：`custom_params` 取代独立字段 `default_size`（尺寸就是 `size=…` 一条），值优先按 JSON 解析；工具显式传入的 `size` 仍优先。
+- **移除 `openai_chat` 与 `dashscope_multimodal`**：对应适配器（`providers/openai_chat.py`、`providers/dashscope.py`）一并删除，接口类型只剩 `openai_image`、`xai_image`、`gemini_official`、`custom_endpoint`。旧节点若写的是被移除的类型会按无效节点跳过，需要在 WebUI 重新选择类型。
+- **参数控件按协议区分**：`quality` 去掉空白项并给默认值（`openai_image` 为 `auto`，`xai_image` 只有 `low`/`medium` 默认 `medium`，Gemini 不显示）；`启用 NSFW` 只在 `xai_image` 出现（配置页用 `condition` 隐藏）。
+- **配置页同步出字段**：AstrBot「插件配置」页也提供「尺寸 / 质量 / 启用 NSFW」，质量按协议拆成 `quality_openai`、`quality_xai` 两个互斥字段（`condition` 只支持等值，这样 Gemini 节点不会显示质量）；其余键留在 `custom_params`，文本框只在 `custom_endpoint` 下显示。
+- **兼容**：旧配置的 `default_size` 读取时仍按 `size=…` 生效（行为不变）；在 WebUI 重新保存节点后写入 `custom_params`。
+
+测试：71 项单元测试通过。
+
 ## 1.2.2 — 2026-09-25
 
 ### 变更

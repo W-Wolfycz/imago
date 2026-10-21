@@ -17,7 +17,7 @@ aiohttp>=3.9,<4
 
 ## 节点配置
 
-至少配置一个有效节点：节点 ID、接口类型、Base URL、API Key、模型、超时和默认尺寸。API Key 可逐行填写多个，每个节点独立按调用顺序轮换，不随机挑选。
+至少配置一个有效节点：节点 ID、接口类型、Base URL、API Key、模型、超时和自定义参数。API Key 可逐行填写多个，每个节点独立按调用顺序轮换，不随机挑选。
 
 调用顺序：
 
@@ -25,19 +25,39 @@ aiohttp>=3.9,<4
 WebUI 选择的主节点默认模型 → 主节点备选模型 → 其他节点默认模型 → 其他节点备选模型
 ```
 
-在 Plugin Page（WebUI）节点列表点击左侧图标并保存，即可切换主节点。未设置或所选节点无效时，第一个有效节点为主节点。同一节点的默认模型和备选模型必须使用同一协议与 Base URL；共用百炼 multimodal-generation 契约的 WAN 与 Qwen 可以放在同一节点。
+在 Plugin Page（WebUI）节点列表点击左侧图标并保存，即可切换主节点。未设置或所选节点无效时，第一个有效节点为主节点。同一节点的默认模型和备选模型必须使用同一协议与 Base URL。
 
 ### 接口类型
 
 | 类型 | 地址示例 | 协议/参考图 |
 | --- | --- | --- |
 | `openai_image` | `https://api.example.com/v1` | images API / multipart |
-| `openai_chat` | `https://api.example.com/v1` | chat/completions / base64 |
+| `xai_image` | `https://api.example.com/v1` | xAI Grok Imagine / JSON 改图（`image`、`images`） |
 | `gemini_official` | `https://generativelanguage.googleapis.com/v1beta` | generateContent / `inlineData` |
-| `dashscope_multimodal` | 百炼完整 generation URL | MultiModal / data URL |
 | `custom_endpoint` | 自定义完整 POST URL | Imago JSON / base64 |
 
 有参考图时自动走图生图分支；否则走文生图。
+
+### xAI Grok Imagine（`xai_image`）
+
+Grok Imagine 的中转都沿用 GPT-Image 的**端点**，但模型 ID 和参数体系各家一套。插件只保证这层端点兼容，**不写死任何一家的模型名或参数名**：
+
+- `base_url`：填中转给的 `…/v1`；带路径就整段填（如 `https://host/api/v1`），插件自动拼 `/images/generations` 与 `/images/edits`；
+- `model`：填服务商文档里的 **Grok 模型 ID**。xAI 官方是 `grok-imagine-image-2.0`（2026-08 起；旧的 `grok-imagine-image-quality` 计划 2026-11-02 退役，`grok-imagine-image` 是快速档），中转常见别名如 `image-2`、`grok-imagine-2.0-ext`，以你的服务商为准；
+- **比例**：`size` 原样发送，同时折算一份 `aspect_ratio`（像素尺寸约分，如 `1024x1024` → `1:1`），两种字段名都能覆盖；
+- 其余参数写进节点「自定义参数」，值按 JSON 解析后原样发送：
+
+| 参数 | 作用 | 官方取值 |
+| --- | --- | --- |
+| `resolution` | 输出分辨率 | `1k`（默认）/ `2k`；API 参考里还有 `1.5k` |
+| `quality` | 渲染档位（2.0 新增，旧模型不支持） | `low` / `medium` / `auto`（默认 `auto`：生图按 `low`、改图按 `medium` 计费） |
+| `n` | 张数 | 1–10（插件按任务张数覆盖） |
+| `response_format` | 返回格式 | `url`（默认）/ `b64_json` |
+| `nsfw`、`providerOptions` 等 | 各家中转私有 | 以服务商文档为准 |
+
+参考图走 `/images/edits`。**官方口径是 JSON**（xAI 明确不支持 OpenAI SDK 的 multipart `images.edit()`）：单图 `image: {url}`、多图 `images: [{url}, …]`，`url` 可以是公网地址或 base64 data URL，多图时提示词里用 `<IMAGE_0>`、`<IMAGE_1>`… 按顺序指代，最多 5 张，省略 `aspect_ratio` 时沿用第一张输入图的比例。只收 multipart 的中转（如 pipiwang）在自定义参数里写 `edit_mode=multipart` 就会切回表单上传（字段名 `image`，不带 `[]`）。
+
+别把 `deferred=true`、`storage_options`、`output.upload_urls` 写进自定义参数：它们会把响应换成 `request_id`/直传模式，插件按同步响应解析，会直接报错。有的中转只支持文生图，带参考图前先确认它支持 edits。官方该模型限流 6 请求/秒。
 
 ### 参考图总上限
 
@@ -181,35 +201,28 @@ DEBUG 会记录阶段、节点和具体模型、成功/失败、参考图数量�
 }
 ```
 
-响应使用 `{"data":[{"url":"..."}]}` 或 `{"data":[{"b64_json":"..."}]}`。`parameters` 只接受用户通过 `--key value` 传入的值。
+响应使用 `{"data":[{"url":"..."}]}` 或 `{"data":[{"b64_json":"..."}]}`。`parameters` 里是用户通过 `--key value` 传入的值，再加上节点自定义参数（同名时本轮参数优先）。
 
-## 图片尺寸怎么填（`default_size` / `size` 参数）
+## 节点参数（按接口类型出控件）
 
-插件的立场是**只设置、不解释**：`size` 不做校验、不做换算，写什么就原样发给上游（百炼节点也一样，要星号请自己写 `1024*1024`）。
+插件页不再让你手写请求体：选中接口类型后，节点只显示**这套协议支持的参数**，存进配置的仍是 `custom_params` 文本（`key=value` 每行一条），换协议时字段跟着换。
 
-| 写法 | 含义 |
+| 接口类型 | 可选参数 |
 | --- | --- |
-| `1024x1024` / `1024*1024` | 像素尺寸（`x` 小写；`*` 写法用于百炼） |
-| `1:1`、`3:4`、`16:9` | 比例串——支持的站点会按该比例出图 |
-| `auto` | 交给上游自选 |
-| 留空 | 不指定：请求里不发送 `size` 字段 |
+| `openai_image` | 尺寸（输入框：`auto`/`1024x1024`/`1536x1024`/`1024x1536`/`1792x1024`/`1024x1792`）、质量（`auto`/`low`/`medium`/`high`，默认 `auto`） |
+| `xai_image` | 比例（输入框：`1:1`/`3:4`/`4:3`/`9:16`/`16:9`/`2:3`/`3:2`/`21:9`/`auto`）、质量（`low`/`medium`，默认 `medium`）、启用 NSFW（勾选框，只有这个协议有） |
+| `gemini_official` | 比例（输入框：`1:1`/`2:3`/`3:2`/`3:4`/`4:3`/`4:5`/`5:4`/`9:16`/`16:9`/`21:9`） |
+| `custom_endpoint` | 尺寸（输入框）+ 自定义参数文本框，按你自己的协议写 |
 
-节点里的 `default_size` 是「用户/主 LLM 没给尺寸时用哪个」（留空 = 不指定），工具传入的 `size` 优先于它。越界或上游不认的值不会被插件纠正，可能被上游报错，或按它自己的尺寸处理。
+- 尺寸/比例是一个输入框，四种写法都收：像素（`1024x1024`）、比例（`16:9`）、`auto`、留空；**留空 = 不发送该字段**。
+- 质量是下拉框（没有空白项）：`openai_image` 默认 `auto`、`xai_image` 只有 `low`/`medium` 默认 `medium`；勾选框不勾是不发送，勾上发 `true`（JSON 布尔，不是字符串）。
+- 尺寸的优先级：本轮工具/主 LLM 显式传了 `size` 就用它，否则用节点里填的值。
+- `xai_image` 同时发 `size` 和 `aspect_ratio`：不同站点认的参数不同，两个都发；像素值会约分（`1024x1024` → `1:1`）。
+- 旧配置里的其他键不会被丢掉：节点下方会提示「另有未识别参数（原样发送）」，保存后照旧生效；`custom_endpoint` 除了尺寸还有自由参数文本框，其余键原样透传。
+- `model`/`prompt`/`n` 由插件按本轮请求写死，不是可配置项。
+- 同一份配置在两处都能改：插件页（下拉/勾选）和 AstrBot「插件配置」页的「尺寸 / 质量 / 启用 NSFW」三个字段值互通；`custom_params` 文本框只在 `custom_endpoint` 类型下出现。
 
-两点实测提醒（new-api 中转站 + `gpt-image-2`）：方形像素尺寸可能被上游吸附到它自己的原生边长（要 `1024x1024` 可能给 1254×1254），比例串与横竖尺寸按你给的值出图；`size` 走像素计费，越大越贵（`2048x2048` 约为方形的 2.6 倍）。另外 `aspect_ratio` 字段在走 images 接口的中转站会被丢弃——比例要写进 `size`。
-
-## `dashscope_multimodal`
-
-```text
-api_type: dashscope_multimodal
-base_url: https://{WorkspaceId}.cn-beijing.maas.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation
-model: qwen-image-3.0-pro
-default_size: 1024x1024
-```
-
-Base URL 必须是同地域、可直接 POST 的完整 generation URL。插件会构造单轮 `input.messages`，`size` 原样发送（需要 `*` 就自己写 `1024*1024`），默认开启 `prompt_extend`，并支持 `negative_prompt`、`seed`、`watermark` 等 `extra_params`。
-
-插件不按模型名写死图片数量或大小能力。参考图数量由节点的 `reference_image_limit` 控制，用户明确附图不会被静默删除；模型自身限制由百炼响应决定。百炼错误会保留脱敏后的 `code/message` 并进入可用的模型/节点 fallback。
+升级提示：1.2.x 的独立字段 `default_size` 已被 `custom_params` 取代。插件读取旧配置时仍会把 `default_size` 当成 `size=…` 生效（行为不变），重新在 WebUI 保存节点后会写进参数。
 
 ## 安全与验证
 

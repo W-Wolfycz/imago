@@ -14,6 +14,7 @@ class DummySession: pass
 
 class SchedulerTests(unittest.IsolatedAsyncioTestCase):
     async def test_provider_api_keys_rotate_between_attempts(self):
+        # key 轮换失效＝总用同一个 key，遇限流不换。
         captured_keys = []
 
         class Adapter:
@@ -42,6 +43,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             else: scheduler_module.ADAPTERS["custom_endpoint"] = old
 
     async def test_selected_primary_provider_is_tried_first_and_invalid_falls_back_to_first(self):
+        # 主节点选择错误＝用户配置无效或流量走错节点。
         attempts = []
 
         class Adapter:
@@ -74,6 +76,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             else: scheduler_module.ADAPTERS["custom_endpoint"] = old
 
     async def test_models_fallback_inside_provider_before_next_node(self):
+        # 回落顺序错＝跨节点乱试，浪费时间与额度。
         attempts = []
         debug_calls = []
         finished = asyncio.Event()
@@ -107,6 +110,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             else: scheduler_module.ADAPTERS["custom_endpoint"] = old
 
     async def test_persona_references_are_randomly_sampled_per_model_limit(self):
+        # Persona 图采样超限或不随机＝参考图分配错误。
         captured = []
         finished = asyncio.Event()
         explicit = ImageInput(b"explicit", "image/png", "explicit.png")
@@ -149,6 +153,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             else: scheduler_module.ADAPTERS["custom_endpoint"] = old
 
     def test_explicit_references_are_kept_when_they_fill_the_limit(self):
+        # 用户附图被 Persona 挤掉＝用户请求被静默改写。
         explicit = [
             ImageInput(b"explicit-1", "image/png", "e1.png"),
             ImageInput(b"explicit-2", "image/png", "e2.png"),
@@ -171,6 +176,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("The first", request.prompt)
 
     def test_relation_suffix_counts_sampled_persona_refs_not_pool(self):
+        # 关系后缀计数用池子而非采样＝提示词与图不符。
         explicit = [ImageInput(b"explicit-1", "image/png", "e1.png")]
         persona = [
             ImageInput(b"p1", "image/png", "p1.png"),
@@ -191,6 +197,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("The remaining 2 image(s)", request.prompt)
 
     async def test_reference_prepare_runs_in_task_before_provider(self):
+        # 取图未完成就调 Provider＝参考图缺失静默退化。
         prepare_started = asyncio.Event()
         allow_prepare = asyncio.Event()
         provider_called = asyncio.Event()
@@ -230,6 +237,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             else: scheduler_module.ADAPTERS["custom_endpoint"] = old
 
     async def test_no_provider_fails_and_reports(self):
+        # 无有效节点不报失败＝任务悬挂。
         finished = asyncio.Event()
         async def runner(task, results): finished.set(); return False
         scheduler = TaskScheduler(lambda: RuntimeConfig(providers=(), generation_timeout=30), DummySession(), runner, lambda *_: None)
@@ -242,6 +250,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         await scheduler.close()
 
     async def test_terminate_cancels_waiting_task_without_output(self):
+        # 关停不取消＝任务悬挂/资源泄漏。
         output = []
         finalized = []
         async def runner(task, results): output.append(task.state); return True
@@ -263,6 +272,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(finalized, [(TaskState.CANCELLED, TaskStage.FINISHED)])
 
     async def test_terminal_notice_error_still_archives_finished_state(self):
+        # 通知失败不归档＝终态丢失、无法复查。
         async def runner(task, results):
             raise RuntimeError("send failed")
 
@@ -279,6 +289,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
         await scheduler.close()
 
     async def test_prequeue_reference_time_counts_toward_total_timeout(self):
+        # 排队时间不计入超时＝总时长无限。
         provider_called = False
         finished = asyncio.Event()
 
@@ -306,6 +317,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             else: scheduler_module.ADAPTERS["custom_endpoint"] = old
 
     async def test_generated_image_send_failure_is_delivery_failure_without_second_notice(self):
+        # 发送失败记成生成失败＝状态误报。
         calls = []
         finished = asyncio.Event()
 
@@ -341,6 +353,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             else: scheduler_module.ADAPTERS["custom_endpoint"] = old
 
     async def test_zero_usable_images_has_no_output_state_even_when_notification_succeeds(self):
+        # 0 张图记成功＝空结果当成功。
         finished = asyncio.Event()
 
         class Adapter:
@@ -386,6 +399,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             else: scheduler_module.ADAPTERS["custom_endpoint"] = old
 
     async def test_network_error_falls_back_but_program_error_fails_fast(self):
+        # 程序错误被当网络错误重试＝掩盖 bug 并重复扣额。
         attempts = []
 
         class NetworkAdapter:
@@ -437,6 +451,7 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             else: scheduler_module.ADAPTERS["custom_endpoint"] = old
 
     async def test_concurrency_limit_increase_and_decrease_are_dynamic(self):
+        # 并发上限不随配置变＝任务堆积或超发。
         limit = [1]
         started = {name: asyncio.Event() for name in ("one", "two", "three", "four")}
         gates = {name: asyncio.Event() for name in started}

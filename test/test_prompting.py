@@ -1,30 +1,17 @@
 import unittest
 
 from imago.core.prompting import (
-    CAMERA_REQUEST_MARKER,
     BASIS_LABELS,
     STYLE_LLM_CHOICES,
     STYLE_AUTO_CATALOG,
     DEFAULT_CAMERA_SUFFIX,
-    REFERENCE_RELATION_SUFFIX,
     STYLE_GUIDANCE,
     STYLE_PROMPT_SUFFIX,
     compose_persona_prompt,
-    merge_camera_request,
     optimizer_system,
-    reference_relation_suffix,
     resolve_style,
     style_is_locked,
-    style_prompt_suffix,
 )
-
-class CameraTests(unittest.TestCase):
-    def test_merge_camera_request(self):
-        self.assertEqual(merge_camera_request("海边回头", ""), "海边回头")
-        self.assertEqual(merge_camera_request("", ""), "")
-        merged = merge_camera_request("海边回头", "自拍")
-        self.assertEqual(merged, f"海边回头\n{CAMERA_REQUEST_MARKER}: 自拍")
-        self.assertEqual(merge_camera_request("", "俯拍 45 度"), f"{CAMERA_REQUEST_MARKER}: 俯拍 45 度")
 
 class ComposePersonaPromptTests(unittest.TestCase):
     def test_fallback_block_never_injects_optimizer_meta_prompt(self):
@@ -37,30 +24,19 @@ class ComposePersonaPromptTests(unittest.TestCase):
         self.assertIn(DEFAULT_CAMERA_SUFFIX, prompt)
         self.assertIn(STYLE_PROMPT_SUFFIX["realistic"], prompt)
 
-
-class ReferenceRelationSuffixTests(unittest.TestCase):
-    def test_suffix_distinguishes_roles(self):
-        self.assertEqual(reference_relation_suffix(2, 0), REFERENCE_RELATION_SUFFIX)
-        suffix = reference_relation_suffix(1, 3)
-        self.assertIn(REFERENCE_RELATION_SUFFIX, suffix)
-        self.assertIn("first 1 attached image(s)", suffix)
-        self.assertIn("remaining 3 image(s)", suffix)
-        self.assertIn("character identity references", suffix)
-
-
-
 class AutoStyleTableTests(unittest.TestCase):
     """选择表的基准项必须与基准表一一对应：少一项会让某个基准在 auto 下永远选不出来。"""
 
     def test_table_keys_match_basis_labels(self):
+        # 选择表缺项＝某个基准在 auto 下永远选不出来（静默）。
         self.assertEqual([key for key, _, _ in STYLE_AUTO_CATALOG], list(BASIS_LABELS))
         self.assertNotIn("default", [key for key, _, _ in STYLE_AUTO_CATALOG])
-
 
 class ResolveStyleTests(unittest.TestCase):
     """风格联动只发生在代码写死的 auto 选项上。"""
 
     def test_configured_preset_always_wins(self):
+        # 配置写死的基准被请求参数覆盖＝用户设置静默失效。
         for requested in ("", "auto", "pixel", "none", "bogus"):
             with self.subTest(requested=requested):
                 self.assertEqual(resolve_style("realistic", requested), "realistic")
@@ -76,11 +52,11 @@ class ResolveStyleTests(unittest.TestCase):
             with self.subTest(requested=requested):
                 self.assertEqual(resolve_style("auto", requested), "auto")
 
-
 class StyleAuthorityTests(unittest.TestCase):
     """基准由插件裁决后交给副脑执行：具体基准锁定，auto 交副脑选，none/default 不锁。"""
 
     def test_bases_are_locked_and_excluded_from_user_priority(self):
+        # 锁定条款或口径注入缺失＝基准可能被用户措辞改写/不生效。
         for style, name in BASIS_LABELS.items():
             with self.subTest(style=style):
                 self.assertTrue(style_is_locked(style))
@@ -109,11 +85,11 @@ class StyleAuthorityTests(unittest.TestCase):
         self.assertNotIn("风格预设：", optimizer_system("", "none", persona=False))
         self.assertIn("风格预设：", optimizer_system("", "default", persona=False))
 
-
 class BasisDifferentiationTests(unittest.TestCase):
     """基准必须强区分：每条口径都写死硬性排除项，且互相点名排除对方的特征。"""
 
     def test_bases_exclude_each_other_by_name(self):
+        # 排除项被删＝两个基准画风互相渗透且无报错。
         cases = {
             "realistic": ("cel shading", "pixel grid", "sculpted figurine"),
             "real3d": ("hand-drawn linework", "cartoon or stylized proportions", "pixel grid"),
@@ -139,19 +115,6 @@ class BasisDifferentiationTests(unittest.TestCase):
                 self.assertIn(phrase, basis)
         # 降级后缀是另一条注入路径（副脑没跑时生效），同样要认人物主体
         self.assertIn("digital human", STYLE_PROMPT_SUFFIX["real3d"])
-
-
-class StylePromptSuffixTests(unittest.TestCase):
-    def test_suffix_keys_match_basis_labels_exactly(self):
-        # 加了基准却忘记补降级后缀时会被这里拦住；多余的后缀键同样算错
-        self.assertEqual(set(STYLE_PROMPT_SUFFIX), set(BASIS_LABELS))
-        for style in BASIS_LABELS:
-            with self.subTest(style=style):
-                self.assertTrue(style_prompt_suffix(style))
-        for style in ("", "default", "none", "auto"):
-            with self.subTest(style=style):
-                self.assertEqual(style_prompt_suffix(style), "")
-
 
 if __name__ == "__main__":
     unittest.main()

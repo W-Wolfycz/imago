@@ -3,13 +3,13 @@
     "description": "日志区分机器人实例",
     "type": "bool",
     "default": false,
-    "hint": "启用后日志前缀附加机器人实例 ID，多 Bot 环境便于定位。日志等级请到 WebUI 插件详情页调整（运行期生效，无需重启）。"
+    "hint": "日志前缀附加机器人实例 ID。"
   },
   "providers": {
     "description": "图片生成节点",
     "type": "template_list",
     "default": [],
-    "hint": "以 Plugin Page（WebUI）选择的主节点为准；未设置或无效时第一个有效节点为主节点，失败后按列表顺序尝试其他节点。",
+    "hint": "主节点以 Plugin Page 选择为准；无效时取第一个有效节点。",
     "templates": {
       "provider": {
         "name": "图片生成节点",
@@ -19,62 +19,107 @@
             "description": "节点 ID",
             "type": "string",
             "default": "primary",
-            "hint": "列表内唯一标识，仅用于日志和内部定位；不要填账号等敏感信息。"
+            "hint": "列表内唯一，仅用于日志与定位。"
           },
           "api_type": {
             "description": "接口类型",
             "type": "string",
             "options": [
               "openai_image",
-              "openai_chat",
+              "xai_image",
               "gemini_official",
-              "dashscope_multimodal",
               "custom_endpoint"
             ],
             "default": "openai_image",
-            "hint": "openai_image=OpenAI images；openai_chat=chat/completions；gemini_official=Gemini；dashscope_multimodal=百炼；custom_endpoint=Imago JSON。"
+            "hint": "openai_image=OpenAI images；xai_image=Grok Imagine；gemini_official=Gemini；custom_endpoint=自定义。"
           },
           "base_url": {
             "description": "接口地址",
             "type": "string",
             "default": "",
-            "hint": "OpenAI 填 `https://host/v1`；Gemini 填 `https://generativelanguage.googleapis.com/v1beta`；百炼/custom 填可直接 POST 的完整 URL。"
+            "hint": "OpenAI / xAI 填 `https://host/v1`；Gemini 填 `https://host/v1beta`；custom 填完整 URL。"
           },
           "api_keys": {
             "description": "API Keys（每行一个）",
             "type": "list",
             "default": [],
-            "hint": "多行填写多个 Key，每行一个；每个节点内按调用顺序轮换，不随机挑选。"
+            "hint": "每行一个，按顺序轮换。"
           },
           "model": {
             "description": "默认模型",
             "type": "string",
             "default": "",
-            "hint": "默认图片模型 ID，必须与接口协议匹配。"
+            "hint": "图片模型 ID，按所选协议填。"
           },
           "reference_image_limit": {
             "description": "参考图总上限",
             "type": "int",
             "default": 0,
-            "hint": "消息附图优先，剩余名额再抽 Persona 图。例：上限 3 且带 1 张用户图时，最多取 2 张 Persona 图；0=不限制，主/备模型共用。"
+            "hint": "附图优先，剩余名额抽 Persona 图；0=不限。"
           },
           "available_models": {
             "description": "备选模型列表",
             "type": "list",
             "default": [],
-            "hint": "默认模型失败后按顺序尝试；所有模型须共用本节点的协议和 Base URL。"
+            "hint": "默认模型失败后按顺序尝试。"
           },
-          "default_size": {
-            "description": "默认图片尺寸（可留空）",
+          "size": {
+            "description": "尺寸 / 比例",
             "type": "string",
-            "default": "1024x1024",
-            "hint": "未指定尺寸时使用；插件原样透传给上游，不校验、不换算。可填像素尺寸（1024x1024 / 1024*1024）、比例（1:1、3:4、16:9）或 auto；留空表示不指定，请求里不发送 size。具体写法与支持范围以各模型文档为准（百炼用 1024*1024）。"
+            "default": "",
+            "hint": "像素、比例或 auto；留空不发送。"
+          },
+          "quality_openai": {
+            "description": "质量",
+            "type": "string",
+            "default": "auto",
+            "options": [
+              "auto",
+              "low",
+              "medium",
+              "high"
+            ],
+            "condition": {
+              "api_type": "openai_image"
+            },
+            "hint": "按所选协议支持的档位填。"
+          },
+          "quality_xai": {
+            "description": "质量",
+            "type": "string",
+            "default": "medium",
+            "options": [
+              "low",
+              "medium"
+            ],
+            "condition": {
+              "api_type": "xai_image"
+            },
+            "hint": "按所选协议支持的档位填。"
+          },
+          "nsfw": {
+            "description": "启用 NSFW",
+            "type": "bool",
+            "default": false,
+            "hint": "勾选时发送 nsfw=true。",
+            "condition": {
+              "api_type": "xai_image"
+            }
+          },
+          "custom_params": {
+            "description": "自定义请求参数",
+            "type": "text",
+            "default": "",
+            "hint": "仅 custom_endpoint 用，每行 key=value。",
+            "condition": {
+              "api_type": "custom_endpoint"
+            }
           },
           "timeout": {
             "description": "单次节点超时（秒）",
             "type": "int",
             "default": 180,
-            "hint": "单次 Provider 请求超时，最小 10 秒；同时受任务总超时限制。"
+            "hint": "单次请求超时，最小 10 秒。"
           }
         }
       }
@@ -83,7 +128,7 @@
   "optimizer_config": {
     "description": "Persona 副脑与识图",
     "type": "object",
-    "hint": "使用副脑优化画面并按需识图；副脑按「成像基准 + 堆砌」两层补写画面（基准由插件裁决，学派/题材/效果/形态按用户措辞叠加）。generate_image 是否经过副脑由「普通绘图也走副脑」控制，/画 指令始终直接出图。",
+    "hint": "副脑优化画面并按需识图；是否走副脑由「普通绘图也走副脑」控制。",
     "items": {
       "enable_optimizer": {
         "description": "启用副脑优化",
@@ -151,7 +196,7 @@
   "quota_config": {
     "description": "绘图额度与访问控制",
     "type": "object",
-    "hint": "限制普通用户通过指令或 LLM 工具创建图片任务；黑名单优先。",
+    "hint": "限制普通用户的绘图次数；黑名单优先。",
     "items": {
       "enable_quota": {
         "description": "启用绘图额度",
@@ -206,7 +251,7 @@
   "task_config": {
     "description": "后台任务",
     "type": "object",
-    "hint": "控制任务总超时和并发数；重载后不恢复任务。",
+    "hint": "任务总超时与并发数。",
     "items": {
       "generation_timeout": {
         "description": "单个任务总超时（秒）",
@@ -255,7 +300,7 @@
   "storage_config": {
     "description": "图片存储与网络安全",
     "type": "object",
-    "hint": "控制参考图、临时缓存和远程图片下载；数据写入 AstrBot 的 imago 数据目录。",
+    "hint": "参考图、临时缓存与远程图片下载。",
     "items": {
       "max_upload_mb": {
         "description": "单张参考图上限（MB）",

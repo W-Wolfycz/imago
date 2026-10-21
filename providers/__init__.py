@@ -1,13 +1,11 @@
 from .custom import CustomEndpointAdapter
-from .dashscope import DashScopeMultimodalAdapter
 from .gemini import GeminiAdapter
-from .openai_chat import OpenAIChatAdapter
 from .openai_image import OpenAIImageAdapter
+from .xai_image import XaiImageAdapter
 
 ADAPTERS = {
     "openai_image": OpenAIImageAdapter,
-    "openai_chat": OpenAIChatAdapter,
+    "xai_image": XaiImageAdapter,
     "gemini_official": GeminiAdapter,
-    "dashscope_multimodal": DashScopeMultimodalAdapter,
     "custom_endpoint": CustomEndpointAdapter,
 }

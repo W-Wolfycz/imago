@@ -8,14 +8,16 @@ from ..core.models import GenerationRequest
 
 class CustomEndpointAdapter(ProviderAdapter):
     async def generate(self, session, request: GenerationRequest, api_key: str):
-        size = request.size or self.config.default_size
+        size = self.request_size(request)
+        parameters = {**self.custom_params(), **request.extra_params}
+        parameters.pop("size", None)
         body = {
             "prompt": request.prompt,
             "model": self.config.model,
             "count": request.count,
             "aspect_ratio": request.aspect_ratio,
             "references": [{"mime_type": image.mime_type, "data": base64.b64encode(image.data).decode()} for image in request.references],
-            "parameters": request.extra_params,
+            "parameters": parameters,
         }
         if size:  # 留空/未指定：不发送该字段，交给上游
             body["size"] = size

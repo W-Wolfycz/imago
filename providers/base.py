@@ -1,11 +1,28 @@
 from __future__ import annotations
 
 import base64
+import json
 from abc import ABC, abstractmethod
 from typing import Any
 
 from ..core.errors import NoOutputError, UnsupportedResponse
 from ..core.models import GenerationRequest, ImageResult, ProviderConfig
+
+
+def _json_scalar(text: str) -> Any:
+    """把 ``true``/``false``/``null``/数字/JSON 文本还原成对应类型，其它保持字符串。
+
+    节点「自定义参数」写的都是文本（``quality=1k``、``nsfw=true``、``size=3:4``），
+    发 JSON 时要让布尔和数字回到原生类型，否则上游会按字符串校验失败；``1k``、``3:4``
+    这类不是合法 JSON，原样当字符串。
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return ""
+    try:
+        return json.loads(stripped)
+    except (TypeError, ValueError):
+        return stripped
 
 
 class ProviderAdapter(ABC):
@@ -14,6 +31,29 @@ class ProviderAdapter(ABC):
 
     @abstractmethod
     async def generate(self, session: Any, request: GenerationRequest, api_key: str) -> list[ImageResult]: ...
+
+    def custom_params(self) -> dict[str, Any]:
+        """节点自定义参数（含 size）：每轮请求都带，值按 JSON 标量还原类型。"""
+        return {key: _json_scalar(raw) for key, raw in self.config.custom_params}
+
+    def request_size(self, request: GenerationRequest) -> str:
+        """本轮使用哪个尺寸：工具/主 LLM 显式传入优先，其次节点自定义参数里的 size。
+
+        都为空时返回空串，调用方据此不发送 size 字段（交上游自选，不兜底成默认值）。
+        """
+        size = str(request.size or "").strip()
+        if size:
+            return size
+        return self.config.param("size").strip()
+
+    @staticmethod
+    def form_value(value: Any) -> str:
+        """multipart 表单值：布尔转 ``true``/``false``，其它字符串化（表单只认文本）。"""
+        if isinstance(value, bool):
+            return "true" if value else "false"
+        if value is None:
+            return ""
+        return str(value)
 
     @staticmethod
     def parse_common(payload: Any) -> list[ImageResult]:

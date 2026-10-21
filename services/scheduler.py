@@ -312,7 +312,7 @@ class TaskScheduler:
                         "task=%s 绘图节点尝试 node=%s type=%s model=%s model_attempt=%d/%d size=%s aspect=%s count=%d references=%d persona_refs=%d",
                         task.id[:8], attempt.id, attempt.api_type, model,
                         model_index, len(models),
-                        attempt_request.size or attempt.default_size, attempt_request.aspect_ratio,
+                        attempt_request.size or attempt.param("size"), attempt_request.aspect_ratio,
                         attempt_request.count, len(attempt_request.references),
                         task.runtime.get("current_persona_reference_count", 0),
                     )

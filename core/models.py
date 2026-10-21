@@ -56,8 +56,17 @@ class ProviderConfig:
     model: str = ""
     available_models: tuple[str, ...] = ()
     reference_image_limit: int = 0
-    default_size: str = "1024x1024"
+    # 节点级自定义请求参数（每行 key=value）：尺寸、quality、nsfw 之类协议细节都走这里，
+    # 不再单独占用配置字段。顺序保留用户书写顺序，重复键在解析时已去重。
+    custom_params: tuple[tuple[str, str], ...] = ()
     timeout: int = 180
+
+    def param(self, key: str) -> str:
+        """取自定义参数原始文本；未设置返回空串（类型还原由适配器负责）。"""
+        for name, value in self.custom_params:
+            if name == key:
+                return value
+        return ""
 
 
 @dataclass(frozen=True, slots=True)
