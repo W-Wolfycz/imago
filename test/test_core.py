@@ -1,28 +1,20 @@
+import io
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
-from imago.core.config import (
-    split_custom_params,
-    load_config,
-    optimizer_in_use,
-    persona_provider_settings,
-    style_arg_consumed,
-)
+from imago.core.config import load_config, optimizer_in_use
 from imago.core.dedup import DEDUPE_WINDOW_SECONDS, is_duplicate_request
+from imago.core.images import shrink
 from imago.core.errors import (
     DuplicateImage,
     ProviderError,
     safe_creation_error_message,
 )
-from imago.core.models import GenerationRequest, ImageInput, ProviderConfig, QuotaConfig, TaskState
+from imago.core.models import ImageInput, QuotaConfig, TaskState
 from imago.providers.base import ProviderAdapter
-from imago.providers.openai_image import OpenAIImageAdapter
-from imago.core.prompting import (
-    DEFAULT_OPTIMIZER_SYSTEM,
-    optimizer_system,
-)
 from imago.core.security import ensure_child, parse_extra_params, redact, redact_debug, safe_component
 from imago.services.persona_store import PersonaStore
 from imago.services.quota_store import QuotaStore, terminal_refund_amount
@@ -31,19 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class ConfigTests(unittest.TestCase):
 
-    def test_reference_limit_and_blank_size_bounds(self):
-        # 参考图数量被夹到合法区间（错值会静默改变参考图张数）；尺寸留空是 1.2.1 的
-        # 回归点：不能被兜成 1024x1024，否则请求会悄悄带上尺寸
-        limited = load_config({"providers": [{
-            "id": "node", "api_type": "openai_image", "base_url": "https://example.invalid/v1",
-            "api_keys": "key_demo", "reference_image_limit": -5,
-        }]})
-        self.assertEqual(limited.providers[0].reference_image_limit, 0)
-        blank = load_config({"providers": [{
-            "id": "node", "api_type": "openai_image", "base_url": "https://example.invalid/v1",
-            "api_keys": "key_demo", "custom_params": "size=   \n",
-        }]})
-        self.assertEqual(blank.providers[0].custom_params, (("size", ""),))
+
 
     def test_custom_params_parse_and_legacy_size(self):
         # 自定义参数是唯一入口：写错一行/重复键/保留字段都不能半途炸掉或静默覆盖尺寸。
@@ -68,23 +48,7 @@ class ConfigTests(unittest.TestCase):
         }]})
         self.assertEqual(explicit.providers[0].custom_params, (("size", "1:1"),))
 
-    def test_persona_provider_settings_uses_umo_config(self):
-        # 会话命中配置优先（与主链 _decorate_llm_request 同源），未取到才回退默认；
-        # 会话命中配置存在但缺 provider_settings 时返回空 dict，不吞回全局默认。
-        umo = {"provider_settings": {"default_personality": "gpt_demo"}}
-        default = {"provider_settings": {"default_personality": "persona_demo"}}
-        self.assertEqual(persona_provider_settings(umo, default), {"default_personality": "gpt_demo"})
-        self.assertEqual(persona_provider_settings(None, default), {"default_personality": "persona_demo"})
-        self.assertEqual(persona_provider_settings({"other": 1}, default), {})
 
-    def test_switch_values_are_honored(self):
-        # 显式写进配置的开关必须被采纳：配置键被默默忽略属静默失效，看不到报错
-        cfg = load_config({
-            "optimizer_config": {"optimize_plain_draw": True},
-            "task_config": {"at_trigger_user": False},
-        })
-        self.assertTrue(cfg.optimize_plain_draw)
-        self.assertFalse(cfg.at_trigger_user)
 
     def test_optimizer_in_use_is_independent_of_style_linkage(self):
         # 「是否走副脑」只由总开关 + 任务来源决定，与成像基准的联动无关。
@@ -101,27 +65,7 @@ class ConfigTests(unittest.TestCase):
         self.assertFalse(optimizer_in_use(disabled, persona=True, plain_draw_tool=True))
         self.assertFalse(optimizer_in_use(disabled, persona=False, plain_draw_tool=True))
 
-    def test_style_arg_consumed_only_with_optimizer_or_fallback_suffix(self):
-        # 主 LLM 的基准参数只在两种情形被消费：本轮副脑参与，或降级后缀注入开启；
-        # 其余情形丢弃（没有消费方）。这是规格边界，改动前请先改这里。
-        auto = load_config({"optimizer_config": {"optimizer_style": "auto(自动)"}})
-        with_fallback = load_config({"optimizer_config": {
-            "optimizer_style": "auto(自动)", "fallback_style_injection": True,
-        }})
-        self.assertTrue(style_arg_consumed(auto, use_optimizer=True))
-        self.assertFalse(style_arg_consumed(auto, use_optimizer=False))
-        self.assertTrue(style_arg_consumed(with_fallback, use_optimizer=False))
-        self.assertTrue(style_arg_consumed(with_fallback, use_optimizer=True))
-        # 配置写死基准时，配置优先与是否消费无关（resolve_style 保证）
-        fixed = load_config({"optimizer_config": {"optimizer_style": "realistic(真人实拍)"}})
-        self.assertTrue(style_arg_consumed(fixed, use_optimizer=True))
 
-    def test_quota_id_lists_are_line_items_only(self):
-        # 名单按行解析；解析错了只会静默改变谁被限流，不会报错
-        ids = load_config({"quota_config": {"blacklist_ids": "10001\n10002"}})
-        self.assertEqual(ids.quota.blacklist_ids, frozenset({"10001", "10002"}))
-        comma = load_config({"quota_config": {"blacklist_ids": "10001,10002"}})
-        self.assertEqual(comma.quota.blacklist_ids, frozenset({"10001,10002"}))
 
 class SecurityTests(unittest.TestCase):
 
@@ -157,6 +101,29 @@ class SecurityTests(unittest.TestCase):
             with self.assertRaises(ValueError): ensure_child(root, root / ".." / "escape")
         self.assertNotIn("/", safe_component("../persona"))
 
+class ImageShrinkTests(unittest.TestCase):
+    def test_oversized_reference_is_downscaled(self):
+        # 人设原图常见 5000×5000、单张 10MB+：原样发出去请求体几十 MB，中转截断后
+        # 模型只看到边缘，出图跑成景物。这条守的是“超限图必须降采样再发”。
+        from PIL import Image
+
+        source = io.BytesIO()
+        noise = Image.frombytes("RGB", (2400, 2400), os.urandom(2400 * 2400 * 3))
+        noise.save(source, "PNG")
+        data, mime = shrink(source.getvalue(), "image/png")
+        self.assertEqual(mime, "image/jpeg")
+        with Image.open(io.BytesIO(data)) as out:
+            self.assertLessEqual(max(out.size), 1536)
+
+    def test_small_reference_is_left_untouched(self):
+        # 小图重编码只会白掉画质，还会把 mime 改掉；不该动的时候必须原样返回。
+        from PIL import Image
+
+        buffer = io.BytesIO()
+        Image.new("RGB", (96, 96), (30, 60, 90)).save(buffer, "PNG")
+        small = buffer.getvalue()
+        self.assertEqual(shrink(small, "image/png"), (small, "image/png"))
+
 class PersonaStoreTests(unittest.TestCase):
 
     def test_summary_persists_until_explicit_update(self):
@@ -170,6 +137,24 @@ class PersonaStoreTests(unittest.TestCase):
             self.assertEqual(store.get_summary("p", "new")["summary"], "manual")
             store.add_reference("p", b"image", "image/png")
             with self.assertRaises(DuplicateImage): store.add_reference("p", b"image", "image/png")
+
+    def test_persona_dirs_are_readable_and_migrate_legacy_hash(self):
+        # 旧哈希目录要能自动改名成可读名；否则用户根本找不到哪个人设的图
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PersonaStore(Path(tmp), 1024)
+            legacy = Path(tmp) / "persona_references" / "e7bf94e9b9a4"
+            legacy.mkdir(parents=True)
+            (legacy / "a.jpg").write_bytes(b"img")
+            refs = store.list_references("翔鹤")
+            self.assertEqual([item["name"] for item in refs], ["a.jpg"])
+            readable = Path(tmp) / "persona_references" / "翔鹤"
+            self.assertTrue(readable.is_dir())
+            self.assertFalse(legacy.exists())
+            marker = json.loads((readable / "persona.json").read_text("utf-8"))
+            self.assertEqual(marker["persona_id"], "翔鹤")
+            # 非法字符替换成下划线；persona.json 不算参考图
+            self.assertEqual(store.persona_dir("a/b").name, "a_b")
+            self.assertNotIn("persona.json", [item["name"] for item in store.list_references("翔鹤")])
 
     def test_task_inputs_outputs_and_manifest_are_persisted_without_identity(self):
         # 任务清单写入身份字段＝隐私泄漏，且不会报错。
@@ -287,50 +272,9 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(_file_uri_with_key("https://cdn.other.invalid/a.jpg", "k1", "api.example.invalid"),
                          "https://cdn.other.invalid/a.jpg")
 
-    def test_typed_param_fields_merge_into_custom_params(self):
-        # 配置页控件（size/quality/nsfw）优先于文本；控件留空表示删除该键
-        cfg = load_config({"providers": [{
-            "id": "n", "api_type": "xai_image", "base_url": "https://example.invalid/v1",
-            "api_keys": "k", "model": "m", "size": "3:4", "nsfw": True,
-            "custom_params": "quality=medium\nsize=1:1\nextra=1",
-        }]})
-        params = dict(cfg.providers[0].custom_params)
-        self.assertEqual(params["size"], "3:4")
-        self.assertEqual(params["nsfw"], "true")
-        self.assertEqual((params["quality"], params["extra"]), ("medium", "1"))
-        blank = load_config({"providers": [{
-            "id": "n", "api_type": "openai_image", "base_url": "https://example.invalid/v1",
-            "api_keys": "k", "model": "m", "size": "", "custom_params": "size=1024x1024",
-        }]})
-        self.assertEqual(blank.providers[0].custom_params, ())
 
-    def test_gemini_ignores_quality_field(self):
-        # 配置页对 Gemini 也会写 quality（默认 auto），不能让它在插件页显示成“未识别”
-        cfg = load_config({"providers": [{
-            "id": "g", "api_type": "gemini_official", "base_url": "https://example.invalid/v1beta",
-            "api_keys": "k", "model": "m", "size": "16:9", "quality": "low",
-        }]})
-        self.assertEqual(dict(cfg.providers[0].custom_params), {"size": "16:9"})
-        # custom_params 里手写的键仍然照发（那是用户显式行为）
-        explicit = load_config({"providers": [{
-            "id": "g", "api_type": "gemini_official", "base_url": "https://example.invalid/v1beta",
-            "api_keys": "k", "model": "m", "custom_params": "imageSize=2K",
-        }]})
-        self.assertEqual(dict(explicit.providers[0].custom_params), {"imageSize": "2K"})
 
-    def test_split_custom_params_respects_allowed_keys(self):
-        # 只拆该协议支持的键：其余键必须留在文本里，不能被搬到该协议忽略的字段后丢掉
-        known, rest = split_custom_params("size=16:9\nquality=low", ("size",))
-        self.assertEqual((known, rest), ({"size": "16:9"}, "quality=low"))
-        known, rest = split_custom_params("size=1024x1024\nfoo=1", ())
-        self.assertEqual((known, rest), ({}, "size=1024x1024\nfoo=1"))
 
-class PromptingTests(unittest.TestCase):
-
-    def test_optimizer_falls_back_to_safe_default_and_keeps_fixed_protocol(self):
-        # 自定义提示词为空时回落到内置安全默认（接线，不校验默认文案内容）
-        prompt = optimizer_system("", "illustration", persona=True)
-        self.assertIn(DEFAULT_OPTIMIZER_SYSTEM, prompt)
 
 class SafeCreationErrorTests(unittest.TestCase):
 

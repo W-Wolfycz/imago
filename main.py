@@ -35,6 +35,7 @@ from .core.dedup import DEDUPE_WINDOW_SECONDS, is_duplicate_request, request_fin
 from .core.errors import DuplicateRequest, QuotaError, safe_creation_error_message
 from .core.models import DrawTask, GenerationRequest, ImageInput, ImageResult, TaskStage, TaskState
 from .core.network import fetch_reference, materialize_result
+from .core.images import REFERENCE_MIME, shrink
 from .core.references import ReferencePlanner, quoted_reply_missing_images
 from .core.prompting import (
     REFERENCE_CAPTION_SYSTEM,
@@ -163,8 +164,11 @@ class Imago(Star):
             timezone_name = str(self.context.get_config().get("timezone", "")).strip()
             if timezone_name:
                 return datetime.now(ZoneInfo(timezone_name)).date().isoformat()
-        except Exception:
-            pass
+        except Exception as exc:
+            # 静默回落 OS 时区会让日切错位（额度按错误的"今天"刷新），这里至少留一次日志。
+            if not getattr(self, "_quota_tz_warned", False):
+                self._quota_tz_warned = True
+                logger.warning("[Imago] 时区配置不可用，回退系统时区 type=%s", type(exc).__name__)
         return datetime.now().astimezone().date().isoformat()
 
     @staticmethod
@@ -401,7 +405,9 @@ class Imago(Star):
                 self.context.get_config(umo=umo),
                 self.context.get_config(),
             )
-        except Exception:
+        except Exception as exc:
+            # 读配置失败会静默解析成系统默认人设（出图换人），至少留一条可查日志。
+            logger.warning("[Imago] 读取会话配置失败，按默认配置解析人设 type=%s", type(exc).__name__)
             provider_settings = {}
         persona_id, persona, _, _ = await resolver(
             umo=umo,
@@ -777,6 +783,12 @@ class Imago(Star):
         self.store.update_task_manifest(task.id, kind=task.kind, state="running", stage=TaskStage.PREPARING_REFERENCES.value)
         await self._resolve_deferred_references(task)
         task.runtime["input_records"] = self.store.persist_task_inputs(task.id, task.request.references)
+        # 审计保留原图；发给上游的副本按开关压缩（storage_config.reference_shrink）
+        if cfg.reference_shrink:
+            task.request.references = [
+                ImageInput(*shrink(item.data, item.mime_type), item.filename)
+                for item in task.request.references
+            ]
         task.runtime["persona_references"] = []
         ref_caption = ""
         if cfg.reference_caption and task.request.references:
@@ -868,8 +880,11 @@ class Imago(Star):
             persona_references = []
             for ref in self.store.list_references(task.persona_id):
                 path = self.store.reference_path(task.persona_id, str(ref["name"]))
-                mime = {".png":"image/png",".jpg":"image/jpeg",".webp":"image/webp",".gif":"image/gif"}.get(path.suffix.lower(), "image/png")
-                persona_references.append(ImageInput(path.read_bytes(), mime, path.name))
+                data = path.read_bytes()
+                mime = REFERENCE_MIME.get(path.suffix.lower(), "image/png")
+                if cfg.reference_shrink:
+                    data, mime = shrink(data, mime)
+                persona_references.append(ImageInput(data, mime, path.name))
             task.runtime["persona_references"] = persona_references
         elif use_optimizer:
             # 普通绘图经副脑（generate_image 且「普通绘图也走副脑」开启，见

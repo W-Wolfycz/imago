@@ -29,6 +29,7 @@ class PersonaStore:
         self._max_upload_bytes = max_upload_bytes
         self.references.mkdir(parents=True, exist_ok=True)
         self.task_cache.mkdir(parents=True, exist_ok=True)
+        self.migrate_legacy_dirs()
 
     @property
     def max_upload_bytes(self) -> int:
@@ -187,8 +188,91 @@ class PersonaStore:
                     return "missing"
         return hashlib.sha256("\n".join(names).encode("utf-8")).hexdigest() if names else ""
 
-    def persona_dir(self, persona_id: str) -> Path:
+    # Windows 文件名禁用字符；Persona 目录直接用人设名，方便在资源管理器里找
+    _UNSAFE_NAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+    @classmethod
+    def _readable_name(cls, persona_id: str) -> str:
+        text = cls._UNSAFE_NAME.sub("_", str(persona_id))
+        text = re.sub(r"\s+", " ", text).strip().strip(".")
+        text = text[:60].strip().strip(".")
+        if not text:
+            return safe_component(persona_id)
+        return text
+
+    def _legacy_dir(self, persona_id: str) -> Path:
         return self.references / safe_component(persona_id)
+
+    def persona_dir(self, persona_id: str) -> Path:
+        """Persona 目录：优先可读名（如 ``拉菲``），并自动迁移旧的哈希目录。
+
+        目录里的 ``persona.json`` 记录真实 persona_id；同名但不同 id（可读名冲突）时
+        退回 ``名字-哈希``，避免两个人设共用同一个目录。
+        """
+        name = self._readable_name(persona_id)
+        directory = self.references / name
+        marker = directory / "persona.json"
+        if directory.exists():
+            recorded = ""
+            try:
+                recorded = str(json.loads(marker.read_text("utf-8")).get("persona_id", ""))
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                recorded = ""
+            if recorded and recorded != str(persona_id):
+                directory = self.references / f"{name}-{safe_component(persona_id)[:8]}"
+        legacy = self._legacy_dir(persona_id)
+        if not directory.exists() and legacy.exists():
+            try:
+                legacy.rename(directory)
+            except OSError:
+                return legacy
+        self._write_marker(directory, persona_id)
+        return directory
+
+    def migrate_legacy_dirs(self) -> None:
+        """把早期用十六进制哈希命名的 Persona 目录改名成可读名（启动时做一次）。
+
+        旧目录名是 persona_id 的 UTF-8 十六进制；解出来就能还原人名。目标已存在时
+        跳过，失败也不影响启动（目录名只影响可读性）。
+        """
+        try:
+            directories = [path for path in self.references.iterdir() if path.is_dir()]
+        except OSError:
+            return
+        for directory in directories:
+            name = directory.name
+            if not re.fullmatch(r"(?:[0-9a-f]{2})+", name):
+                continue
+            try:
+                persona_id = bytes.fromhex(name).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                continue
+            target = self.references / self._readable_name(persona_id)
+            if target.exists():
+                continue
+            try:
+                directory.rename(target)
+            except OSError:
+                continue
+            self._write_marker(target, persona_id)
+
+    @staticmethod
+    def _write_marker(directory: Path, persona_id: str) -> None:
+        marker = directory / "persona.json"
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            current = json.loads(marker.read_text("utf-8"))
+        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            current = None
+        if isinstance(current, dict) and current.get("persona_id") == str(persona_id):
+            return
+        try:
+            marker.write_text(
+                json.dumps({"persona_id": str(persona_id)}, ensure_ascii=False, indent=2),
+                "utf-8",
+            )
+        except OSError:
+            pass
 
     def add_reference(self, persona_id: str, data: bytes, mime_type: str) -> dict[str, str | int]:
         if mime_type not in ALLOWED_MIME or not data or len(data) > self.max_upload_bytes:
@@ -206,7 +290,11 @@ class PersonaStore:
         directory = self.persona_dir(persona_id)
         if not directory.exists():
             return []
-        return [{"name": p.name, "size": p.stat().st_size} for p in sorted(directory.iterdir()) if p.is_file() and not p.is_symlink()]
+        return [
+            {"name": p.name, "size": p.stat().st_size}
+            for p in sorted(directory.iterdir())
+            if p.is_file() and not p.is_symlink() and p.name != "persona.json"
+        ]
 
     def reference_path(self, persona_id: str, filename: str) -> Path:
         if Path(filename).name != filename:

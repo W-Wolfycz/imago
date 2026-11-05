@@ -216,6 +216,7 @@ def load_config(raw: Mapping[str, Any]) -> RuntimeConfig:
         at_trigger_user=bool(tasks.get("at_trigger_user", True)),
         max_upload_bytes=max(1, int(storage.get("max_upload_mb", 20) or 20)) * 1024 * 1024,
         temp_cache_bytes=max(16, int(storage.get("temp_cache_mb", 512) or 512)) * 1024 * 1024,
+        reference_shrink=bool(storage.get("reference_shrink", True)),
         block_private_networks=bool(storage.get("block_private_networks", True)),
         log_with_bot_id=bool(raw.get("log_with_bot_id", False)),
     )

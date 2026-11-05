@@ -267,22 +267,38 @@ REFERENCE_RELATION_SUFFIX = (
 )
 
 
+REFERENCE_SUFFIX_MARKER = "attached image(s)"
+
+
 def reference_relation_suffix(explicit_count: int, persona_count: int) -> str:
-    """显式参考图关系声明；人设固定图并存时补充两者的位置与角色。
+    """参考图关系声明：说清每张图是「用户指定参考」还是「人设身份参考」。
+
+    只有人设固定图（explicit_count == 0）时必须单独成句：这时没有任何用户参考图，
+    若仍写「前 1 张是用户参考」，数量与角色都对不上，模型容易把参考图当成本轮
+    画面源、沿用其背景与构图。因此该分支只声明身份参考，并要求按文字重新排场景。
 
     发送顺序为 [显式参考图..., 人设固定图...]：明确告诉图片模型前 N 张是用户
     指定的参考（照它做姿势/服装/风格/构图），其余只是人设身份参考，避免模型
     在图片较多时默认跟随数量占优的人设图。
     """
-    parts = [REFERENCE_RELATION_SUFFIX]
-    if persona_count > 0:
-        parts.append(
-            f"The first {max(1, explicit_count)} attached image(s) are the user-provided "
-            "reference(s) for this request — follow them for the requested pose, outfit, "
-            f"style or composition. The remaining {persona_count} image(s) are the "
-            "character identity references."
+    if persona_count > 0 and explicit_count <= 0:
+        return (
+            f"All {persona_count} attached image(s) are character identity references only: "
+            "match the character's face, hair, outfit and body, but compose the requested "
+            "scene from the text; do not copy their background, framing or composition."
         )
-    return "\n\n".join(parts)
+    if persona_count > 0:
+        # 有用户参考图时不再套用「全部图都当画面源」的通用句：那句话会让人设图
+        # 的背景与构图也被一并继承。
+        return (
+            f"The first {explicit_count} attached image(s) are the user-provided "
+            "reference(s) for this request — follow them for the requested pose, outfit, "
+            f"style or composition. The remaining {persona_count} image(s) are character "
+            "identity references only: match the character's face, hair, outfit and body, "
+            "but do not copy their background, framing or composition, and compose the "
+            "requested scene from the text."
+        )
+    return REFERENCE_RELATION_SUFFIX
 
 CAMERA_REQUEST_MARKER = "Camera request"
 

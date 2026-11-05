@@ -308,6 +308,12 @@
         "default": 20,
         "hint": "适用于上传、消息参考图和远程下载；最小按 1 MB 处理。"
       },
+      "reference_shrink": {
+        "description": "发送前压缩参考图",
+        "type": "bool",
+        "default": true,
+        "hint": "长边超 1536 或体积超 600KB 的参考图压到 1536 / JPEG 85；人设原图常有 10MB+，压缩只影响发往上游的副本。"
+      },
       "temp_cache_mb": {
         "description": "临时图片缓存上限（MB）",
         "type": "int",

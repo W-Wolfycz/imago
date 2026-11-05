@@ -102,6 +102,7 @@ class RuntimeConfig:
     at_trigger_user: bool = True
     max_upload_bytes: int = 20 * 1024 * 1024
     temp_cache_bytes: int = 512 * 1024 * 1024
+    reference_shrink: bool = True
     block_private_networks: bool = True
     log_with_bot_id: bool = False
 

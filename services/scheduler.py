@@ -16,7 +16,11 @@ except ImportError:  # 允许在不含 AstrBot 运行依赖的源码环境运行
 
 from ..core.errors import ConfigurationError, NoOutputError, ProviderError
 from ..core.models import DrawTask, ImageResult, TaskStage, TaskState
-from ..core.prompting import REFERENCE_RELATION_SUFFIX, reference_relation_suffix
+from ..core.prompting import (
+    REFERENCE_RELATION_SUFFIX,
+    REFERENCE_SUFFIX_MARKER,
+    reference_relation_suffix,
+)
 from ..core.security import redact_debug
 from ..providers import ADAPTERS
 
@@ -120,7 +124,10 @@ class TaskScheduler:
             selected_persona = persona_references
         references = [*explicit_references, *selected_persona]
         prompt = task.request.prompt
-        if explicit_references and REFERENCE_RELATION_SUFFIX not in prompt:
+        appended = any(
+            marker in prompt for marker in (REFERENCE_RELATION_SUFFIX, REFERENCE_SUFFIX_MARKER)
+        )
+        if references and not appended:
             # 低优先级关系声明按本节点实际采样数量追加：前 N 张是用户指定参考、
             # 其余是人设固定图，避免模型在图片较多时默认跟随人设图（按全量池
             # 计数会在 reference_image_limit 采样后数量虚高）。
@@ -151,6 +158,7 @@ class TaskScheduler:
 
     async def _execute(self, task: DrawTask) -> None:
         config = self.config_getter()
+        results: list[ImageResult] = []
         try:
             remaining = config.generation_timeout - max(0.0, time.monotonic() - task.created_at)
             if remaining <= 0:
@@ -216,8 +224,13 @@ class TaskScheduler:
             task.errors.append(type(exc).__name__)
             # 供失败配文透传原因：脱敏 + 截断，避免上游任意文本直接进 LLM 上下文。
             task.runtime["last_provider_error"] = redact_debug(str(exc))[:200] or type(exc).__name__
-            if task.runtime.get("generation_success"):
+            # runner（发送协程）抛异常时 generation_success 还没写入：已产出的图不能记成
+            # 生成失败，否则既退款又按"生成失败"配文——应归到投递失败。
+            if results:
                 task.state = TaskState.DELIVERY_FAILED
+                task.runtime["generation_success"] = True
+                task.runtime.setdefault("usable_output_count", len(results))
+                task.errors.append(f"delivery:{type(exc).__name__}")
             elif isinstance(exc, NoOutputError):
                 task.state = TaskState.NO_OUTPUT
             elif task.runtime.get("output_processing_completed"):

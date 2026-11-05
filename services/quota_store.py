@@ -79,7 +79,18 @@ class QuotaStore:
     def _load(self) -> dict:
         try:
             value = json.loads(self.path.read_text("utf-8"))
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+        except FileNotFoundError:
+            value = {}
+        except (json.JSONDecodeError, OSError) as exc:
+            # 损坏时按空表继续会让所有余额静默清零；只提示一次，避免每次读写都刷屏。
+            if not getattr(self, "_corrupt_warned", False):
+                self._corrupt_warned = True
+                try:
+                    from astrbot.api import logger
+                except ImportError:
+                    logger = None
+                if logger is not None:
+                    logger.warning("[Imago] 额度文件不可读，按空表继续 type=%s", type(exc).__name__)
             value = {}
         users = value.get("users", {}) if isinstance(value, dict) else {}
         return {

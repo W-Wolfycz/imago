@@ -36,7 +36,7 @@ WebUI 选择的主节点默认模型 → 主节点备选模型 → 其他节点�
 | `gemini_official` | `https://generativelanguage.googleapis.com/v1beta` | generateContent / `inlineData` |
 | `custom_endpoint` | 自定义完整 POST URL | Imago JSON / base64 |
 
-有参考图时自动走图生图分支；否则走文生图。
+有参考图时自动走图生图分支；否则走文生图。人设图与用户附图会分别声明角色：用户图决定姿势/构图，人设图只提供身份，模型按文字重排场景。
 
 ### xAI Grok Imagine（`xai_image`）
 
@@ -58,6 +58,12 @@ Grok Imagine 的中转都沿用 GPT-Image 的**端点**，但模型 ID 和参数
 参考图走 `/images/edits`。**官方口径是 JSON**（xAI 明确不支持 OpenAI SDK 的 multipart `images.edit()`）：单图 `image: {url}`、多图 `images: [{url}, …]`，`url` 可以是公网地址或 base64 data URL，多图时提示词里用 `<IMAGE_0>`、`<IMAGE_1>`… 按顺序指代，最多 5 张，省略 `aspect_ratio` 时沿用第一张输入图的比例。只收 multipart 的中转（如 pipiwang）在自定义参数里写 `edit_mode=multipart` 就会切回表单上传（字段名 `image`，不带 `[]`）。
 
 别把 `deferred=true`、`storage_options`、`output.upload_urls` 写进自定义参数：它们会把响应换成 `request_id`/直传模式，插件按同步响应解析，会直接报错。有的中转只支持文生图，带参考图前先确认它支持 edits。官方该模型限流 6 请求/秒。
+
+参考图发送前默认压缩：长边超 1536 或体积超 600KB 缩到 1536 / JPEG 85，可在配置「图片存储」里用「发送前压缩参考图」关闭。
+
+### Persona 数据目录
+
+参考图存放在 AstrBot 数据目录的 `plugin_data/imago/persona_references/<人设名>/`，目录名就是人设名（非法字符替换成 `_`），里面有 `persona.json` 记录真实 ID；早期版本的十六进制哈希目录会在插件启动时自动改名（如 `e7bf94e9b9a4` → `翔鹤`）。
 
 ### 参考图总上限
 

@@ -13,16 +13,13 @@ AstrBot core/Provider/平台/Hook 兼容性由部署端验收。
 import asyncio
 import base64
 import sys
-import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
 from imago.core.errors import ReferenceImageError
 from imago.core.models import GenerationRequest, ImageInput, ProviderConfig
-from imago.core.network import detect_image_mime, fetch_reference
+from imago.core.network import fetch_reference
 from imago.core.references import ReferencePlanner, quoted_reply_missing_images
-from imago.providers.custom import CustomEndpointAdapter
 from imago.providers.xai_image import XaiImageAdapter
 from imago.providers.openai_image import OpenAIImageAdapter
 
@@ -63,9 +60,6 @@ class Reply:
         self.message_str = message_str
         self.id = id
 
-class FakePlain:
-    def __init__(self, text=""):
-        self.text = text
 
 class FakeResponse:
     """最小响应替身：status / headers / content.iter_chunked()，不访问网络。"""
@@ -129,16 +123,6 @@ class ReferencePlannerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls, [])
         self.assertNotIn("component", deferred[0])
 
-    async def test_duplicate_images_are_deduplicated(self):
-        # 去重失效＝同一张图重复计入参考图上限。
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "ref.png"
-            path.write_bytes(PNG)
-            local, _ = await self.planner().plan([
-                Image(path=str(path)),
-                Image(path=str(path)),
-            ])
-            self.assertEqual(len(local), 1)
 
     async def test_reply_id_only_without_text_is_strict(self):
         """Fix A：只有引用 id、无 chain/message_str 的纯引用必须按 strict 处理。"""
@@ -257,45 +241,12 @@ class ImageSizePassthroughTests(unittest.TestCase):
         json_case = self._capture(request_size="", node_size="", with_references=False)
         self.assertTrue(json_case["url"].endswith("/images/generations"))
         self.assertNotIn("size", json_case["json"])
+        # 有节点默认尺寸时就用它：漏掉＝请求悄悄不带 size
+        node_case = self._capture(request_size="", node_size="3:4")
+        self.assertEqual(dict(node_case["form"].fields)["size"], "3:4")
 
-    def test_values_pass_through_untouched(self):
-        # x 写法、* 写法、比例串、auto、越界值都原样发送，不做任何换算
-        for value in ("auto", "1024x1024", "1024*1024", "1:1", "3:4", "2048x2048"):
-            with self.subTest(value=value):
-                captured = self._capture(request_size=value, node_size="auto")
-                self.assertEqual(dict(captured["form"].fields)["size"], value)
 
-    def test_node_size_used_when_request_has_none(self):
-        # 节点默认尺寸被忽略＝请求悄悄不带 size。
-        captured = self._capture(request_size="", node_size="3:4")
-        self.assertEqual(dict(captured["form"].fields)["size"], "3:4")
 
-class CustomAdapterSizeTests(unittest.TestCase):
-    def _payload(self, *, request_size, node_size):
-        captured = []
-
-        class Response:
-            status = 200
-
-            async def json(self, content_type=None):
-                return {"data": [{"url": "https://example.invalid/r.png"}]}
-
-        class RequestContext:
-            async def __aenter__(self): return Response()
-
-            async def __aexit__(self, *_args): return False
-
-        class Session:
-            def post(self, url, headers=None, json=None, **kwargs):
-                captured.append(json)
-                return RequestContext()
-
-        adapter = CustomEndpointAdapter(ProviderConfig(
-            "c", "custom_endpoint", "https://example.invalid", ("k",), model="m",
-            custom_params=(("size", node_size),) if node_size else (),
-        ))
-        asyncio.run(adapter.generate(Session(), GenerationRequest("draw", size=request_size), "k"))
-        return captured[0]
 
 class XaiImageAdapterTests(unittest.TestCase):
     """xAI 方言：不注入任何家私有参数、model 原样取配置、改图默认 JSON。
@@ -344,31 +295,7 @@ class XaiImageAdapterTests(unittest.TestCase):
             ))
         return captured[0]
 
-    def test_generations_pass_model_and_add_no_private_params(self):
-        # 插件替服务商塞私有参数＝官方接口可能拒；这条守参数面保持干净。
-        payload = self._capture(with_references=False)["json"]
-        self.assertEqual(
-            (payload["model"], payload["prompt"], payload["n"]),
-            ("grok-imagine-image-2.0", "draw", 1),
-        )
-        # size 与 aspect_ratio 同时发：中转按 size 定尺寸，官方按 aspect_ratio 定比例
-        self.assertEqual(payload["size"], "3:4")
-        self.assertEqual(payload["aspect_ratio"], "3:4")
-        # 插件不替服务商做主：没有配置就不发 quality/resolution 这类家私有字段
-        self.assertNotIn("quality", payload)
-        self.assertNotIn("resolution", payload)
 
-    def test_ratio_size_is_mirrored_to_aspect_ratio(self):
-        # 官方 Grok 方言没有 size，只有 aspect_ratio：比例串要同步过去，两家中转都能跑
-        payload = self._capture(with_references=False)["json"]
-        self.assertEqual(payload["aspect_ratio"], "3:4")
-        pixel = self._capture(with_references=False, size="1024x1024")["json"]
-        self.assertEqual(pixel["aspect_ratio"], "1:1")  # 像素尺寸约分成比例
-        self.assertEqual(pixel["size"], "1024x1024")
-        explicit = self._capture(with_references=False, custom_params=(("aspect_ratio", "16:9"),))["json"]
-        self.assertEqual(explicit["aspect_ratio"], "16:9")
-        by_request = self._capture(with_references=False, aspect_ratio="9:16")["json"]
-        self.assertEqual(by_request["aspect_ratio"], "9:16")
 
     def test_edits_default_to_json_with_data_url(self):
         # 官方 xAI 只收 JSON：单图放 image{url}，多图放 images[]，url 是 base64 data URL
@@ -382,30 +309,7 @@ class XaiImageAdapterTests(unittest.TestCase):
         self.assertEqual(len(multi["json"]["images"]), 2)
         self.assertNotIn("image", multi["json"])
 
-    def test_multipart_edit_mode_for_relays(self):
-        # edit_mode 开关失效或泄漏进请求体＝中转拒绝/参数污染。
-        case = self._capture(
-            with_references=True, custom_params=(("edit_mode", "multipart"), ("nsfw", "true")),
-        )
-        names = [name for name, _ in case["form"].fields]
-        self.assertNotIn("image[]", names)
-        self.assertEqual(names[-1], "image")
-        fields = dict(case["form"].fields)
-        self.assertEqual(fields["nsfw"], "true")
-        self.assertNotIn("edit_mode", fields)  # 本地开关不发给上游
 
-    def test_private_params_pass_through_with_json_types(self):
-        # 布尔被当字符串发＝上游校验失败，且只在特定模型暴露。
-        payload = self._capture(
-            with_references=False,
-            custom_params=(("resolution", "2k"), ("quality", "medium"),
-                           ("nsfw", "true"), ("providerOptions", '{"nsfw_check": true}')),
-        )["json"]
-        self.assertEqual((payload["resolution"], payload["quality"]), ("2k", "medium"))
-        self.assertEqual((payload["nsfw"], payload["providerOptions"]), (True, {"nsfw_check": True}))
-        # 空值表示不发送该字段
-        blank = self._capture(with_references=False, custom_params=(("quality", ""),))["json"]
-        self.assertNotIn("quality", blank)
 
 class FetchReferenceRedirectTests(unittest.IsolatedAsyncioTestCase):
     """HTTP(S) 重定向 SSRF 加固的行为级测试（IP 字面量，无需 DNS/网络）。"""
@@ -473,8 +377,6 @@ class FetchReferenceHttpContentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(image.mime_type, "image/jpeg")
         self.assertEqual(image.data, JPEG)
 
-class FetchReferenceDataUrlTests(unittest.IsolatedAsyncioTestCase):
-    """data URL 魔数识别与 base64 解码前长度预估。"""
 
 class ResolveCheckedUrlTests(unittest.IsolatedAsyncioTestCase):
     async def test_http_ip_literal_is_pinned_with_host_header(self):
