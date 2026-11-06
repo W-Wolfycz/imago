@@ -13,6 +13,39 @@ class DummySession: pass
 
 class SchedulerTests(unittest.IsolatedAsyncioTestCase):
 
+    async def test_disabled_provider_is_skipped(self):
+        # 停用节点仍被调度＝"临时禁用"变成无效开关，请求白白打到它身上（状态可见性为零）
+        tried = []
+
+        class Adapter:
+            def __init__(self, config): self.config = config
+
+            async def generate(self, session, request, key):
+                tried.append(self.config.id)
+                return [ImageResult(data=b"image")]
+
+        old = scheduler_module.ADAPTERS.get("custom_endpoint")
+        scheduler_module.ADAPTERS["custom_endpoint"] = Adapter
+        providers = (
+            ProviderConfig("off", "custom_endpoint", "https://example.invalid", ("key",),
+                           model="model", enabled=False),
+            ProviderConfig("on", "custom_endpoint", "https://example.invalid", ("key",),
+                           model="model"),
+        )
+        scheduler = TaskScheduler(
+            lambda: RuntimeConfig(providers=providers, generation_timeout=30),
+            DummySession(), lambda *_: None, lambda *_: None,
+        )
+        task = DrawTask("", "umo", GenerationRequest("x"))
+        try:
+            results = await scheduler._generate(task)
+            self.assertEqual(tried, ["on"])
+            self.assertEqual(len(results), 1)
+        finally:
+            await scheduler.close()
+            if old is None: scheduler_module.ADAPTERS.pop("custom_endpoint", None)
+            else: scheduler_module.ADAPTERS["custom_endpoint"] = old
+
     async def test_selected_primary_provider_is_tried_first_and_invalid_falls_back_to_first(self):
         # 主节点选择错误＝用户配置无效或流量走错节点。
         attempts = []

@@ -177,6 +177,7 @@ def load_config(raw: Mapping[str, Any]) -> RuntimeConfig:
             model=str(item.get("model", "")).strip(),
             available_models=tuple(str(v) for v in (item.get("available_models", []) or [])),
             reference_image_limit=max(0, int(item.get("reference_image_limit", 0) or 0)),
+            enabled=bool(item.get("enabled", True)),
             custom_params=provider_custom_params(item),
             timeout=max(10, int(item.get("timeout", 180) or 180)),
         ))

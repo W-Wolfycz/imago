@@ -293,8 +293,9 @@ class TaskScheduler:
             task.errors.append(f"terminal_notice:{type(exc).__name__}")
 
     async def _generate(self, task: DrawTask) -> list[ImageResult]:
-        providers = list(self.config_getter().providers)
-        if not providers: raise ConfigurationError("未配置有效图片节点")
+        # 停用节点保留配置但不参与调度：漏过滤会让"临时禁用"变成无效开关
+        providers = [item for item in self.config_getter().providers if item.enabled]
+        if not providers: raise ConfigurationError("未配置有效图片节点（检查节点是否被停用）")
         primary_id = str(task.runtime.get("primary_provider_id", ""))
         if primary_id:
             primary = next((item for item in providers if item.id == primary_id), None)

@@ -162,17 +162,24 @@ def reference_caption_user_prompt(scene_request: str) -> str:
     )
 
 
-def caption_system_text(persona_prompt: str, has_images: bool) -> str:
+def caption_system_text(persona_prompt: str, has_images: bool, media: str = "") -> str:
     """配文 system prompt 正文：人设口吻 + 按结果区分图片说明。
 
     has_images=True（成功/部分成功）：说明图片会拼接在配文之后。
     has_images=False（失败/超时，无图）：明确禁止声称图片已准备好，
     否则与 user prompt 的失败结果矛盾，模型会被带偏输出成功口吻。
+    ``media`` 只在结果已知时传入（"animated" / "still"）；预生成阶段留空。
     """
     if has_images:
         image_note = (
             "你写的这句话会与随后发送的若干张图片一起送达用户，"
             "图片拼接在文字末尾，请据此自然地告知用户图片已准备好。"
+            "产出可能是静态图片，也可能是动图（GIF/动态 WebP）：不要声称自己拍不出会动的，"
+            "也不要把结果限定成「照片」，用「图」「画面」这类中性说法即可。"
+            + {
+                "animated": "本次发送的确是动图，可以自然地用「动图」来说。",
+                "still": "本次发送的是静态图片，不要说成动图或视频。",
+            }.get(media, "")
         )
     else:
         image_note = (

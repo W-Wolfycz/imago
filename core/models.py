@@ -56,6 +56,8 @@ class ProviderConfig:
     model: str = ""
     available_models: tuple[str, ...] = ()
     reference_image_limit: int = 0
+    # 临时停用：仍保留配置，但调度时跳过（用于测试某个节点前的降级行为）
+    enabled: bool = True
     # 节点级自定义请求参数（每行 key=value）：尺寸、quality、nsfw 之类协议细节都走这里，
     # 不再单独占用配置字段。顺序保留用户书写顺序，重复键在解析时已去重。
     custom_params: tuple[tuple[str, str], ...] = ()

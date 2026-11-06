@@ -82,6 +82,8 @@ Grok Imagine 的中转都沿用 GPT-Image 的**端点**，但模型 ID 和参数
 | `/imago ref-upload` | 上传 Persona 参考图 |
 | `/imago summary-show/rebuild/set` | 查看、重建或设置外观摘要 |
 | `/imago provider-primary <节点 ID>` | 指定主节点（也可在 WebUI 设置） |
+| `/imago provider-disable <节点 ID>` | 临时停用节点（保留配置，用于测试降级/换节点） |
+| `/imago provider-enable <节点 ID>` | 重新启用节点 |
 
 `/imago photo` 与 `/拍照` 的受理回复使用“当前人设”，不显示英文 `Persona`。
 

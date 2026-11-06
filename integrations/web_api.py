@@ -162,6 +162,7 @@ class PageAPI:
                 "api_type": str(item.get("api_type", "")),
                 "model": str(item.get("model", "")),
                 "reference_image_limit": _safe_int(item.get("reference_image_limit"), 0, 0),
+                "enabled": bool(item.get("enabled", True)),
                 "available_models": [str(value) for value in (item.get("available_models", []) or [])],
                 "base_url": str(item.get("base_url", "")),
                 "api_keys_configured": has_keys,
@@ -172,8 +173,8 @@ class PageAPI:
             })
             seen.add(provider_id)
         primary = self.plugin.store.get_primary_provider_id()
-        raw_ids = [item["id"] for item in configured]
-        effective = primary if primary in raw_ids else (raw_ids[0] if raw_ids else "")
+        active_ids = [item["id"] for item in configured if item["enabled"]]
+        effective = primary if primary in active_ids else (active_ids[0] if active_ids else "")
         chat_providers = []
         for provider in self.plugin.context.get_all_providers():
             try:
@@ -229,6 +230,8 @@ class PageAPI:
                     custom_params, TYPED_KEYS_BY_API.get(api_type, ()))
                 saved.append({
                     "id": provider_id,
+                    # 页面可能不发这个字段：保留旧值，避免保存一次就把停用节点悄悄启用
+                    "enabled": bool(item.get("enabled", old.get("enabled", True))),
                     "api_type": api_type,
                     "base_url": str(item.get("base_url", "")).strip(),
                     "api_keys": submitted_keys if submitted_keys else stored_keys,

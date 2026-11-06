@@ -7,7 +7,7 @@ from pathlib import Path
 
 from imago.core.config import load_config, optimizer_in_use
 from imago.core.dedup import DEDUPE_WINDOW_SECONDS, is_duplicate_request
-from imago.core.images import shrink
+from imago.core.images import is_animated, shrink
 from imago.core.errors import (
     DuplicateImage,
     ProviderError,
@@ -123,6 +123,19 @@ class ImageShrinkTests(unittest.TestCase):
         Image.new("RGB", (96, 96), (30, 60, 90)).save(buffer, "PNG")
         small = buffer.getvalue()
         self.assertEqual(shrink(small, "image/png"), (small, "image/png"))
+
+class AnimatedImageTests(unittest.TestCase):
+    def test_animated_detection(self):
+        # 判错会让配文把动图说成静图（反之亦然），用户看到的是"文不对图"。
+        from PIL import Image
+
+        frames = [Image.new("RGB", (16, 16), color) for color in ((255, 0, 0), (0, 255, 0))]
+        buffer = io.BytesIO()
+        frames[0].save(buffer, "GIF", save_all=True, append_images=frames[1:])
+        self.assertTrue(is_animated(buffer.getvalue()))
+        static = io.BytesIO()
+        Image.new("RGB", (16, 16)).save(static, "PNG")
+        self.assertFalse(is_animated(static.getvalue()))
 
 class PersonaStoreTests(unittest.TestCase):
 

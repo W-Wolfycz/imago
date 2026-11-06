@@ -46,3 +46,17 @@ def shrink(data: bytes, mime_type: str) -> tuple[bytes, str]:
         if logger is not None:
             logger.debug("[Imago] 参考图解码失败，按原图发送 type=%s", type(exc).__name__)
         return data, mime_type
+
+
+def is_animated(source) -> bool:
+    """判断结果是否为动图（GIF/动态 WebP）。路径或 bytes 均可；判断失败按静态处理。"""
+    try:
+        from PIL import Image
+    except ImportError:
+        return False
+    try:
+        image = Image.open(io.BytesIO(source)) if isinstance(source, (bytes, bytearray)) else Image.open(source)
+        with image:
+            return bool(getattr(image, "is_animated", False))
+    except Exception:
+        return False
