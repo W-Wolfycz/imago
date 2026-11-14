@@ -17,10 +17,9 @@ class OpenAIImageAdapter(ProviderAdapter):
     # 参考图字段名：OpenAI 用 image[]，xAI / Grok 中转用 image（见 XaiImageAdapter）
     image_field = "image[]"
     # 协议固定携带、可被自定义参数覆盖的字段
-    default_fields: dict[str, Any] = {}
 
     def request_fields(self, request: GenerationRequest) -> dict[str, Any]:
-        merged = {**self.default_fields, **self.custom_params(), **request.extra_params}
+        merged = {**self.custom_params(), **request.extra_params}
         # 空值不发送：既能避免上游把空字符串当非法参数，也让 `quality=` / `nsfw=` 这种
         # 写法能关掉协议默认字段（Grok 节点用 image-1 时中转站未必认这两个字段）。
         fields = {key: value for key, value in merged.items() if value is not None and value != ""}

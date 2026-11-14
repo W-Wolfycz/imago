@@ -2,7 +2,7 @@
 
 IMAGO·映相是 AstrBot 的异步图片生成插件，支持普通绘图、Persona 出镜、参考图、多节点/多模型 fallback、绘图额度和素材管理。
 
-- 版本：`1.1.6`
+- 版本：`1.4.0`
 - AstrBot：`>=4.16,<5`
 
 ## 安装
@@ -40,30 +40,35 @@ WebUI 选择的主节点默认模型 → 主节点备选模型 → 其他节点�
 
 ### xAI Grok Imagine（`xai_image`）
 
-Grok Imagine 的中转都沿用 GPT-Image 的**端点**，但模型 ID 和参数体系各家一套。插件只保证这层端点兼容，**不写死任何一家的模型名或参数名**：
+按 xAI 官方口径实现；各家中转的模型 ID 与私有参数不同，插件不写死，**只保证端点与公共字段名**：
 
 - `base_url`：填中转给的 `…/v1`；带路径就整段填（如 `https://host/api/v1`），插件自动拼 `/images/generations` 与 `/images/edits`；
-- `model`：填服务商文档里的 **Grok 模型 ID**。xAI 官方是 `grok-imagine-image-2.0`（2026-08 起；旧的 `grok-imagine-image-quality` 计划 2026-11-02 退役，`grok-imagine-image` 是快速档），中转常见别名如 `image-2`、`grok-imagine-2.0-ext`，以你的服务商为准；
-- **比例**：`size` 原样发送，同时折算一份 `aspect_ratio`（像素尺寸约分，如 `1024x1024` → `1:1`），两种字段名都能覆盖；
-- 其余参数写进节点「自定义参数」，值按 JSON 解析后原样发送：
+- `model`：填服务商文档里的 **Grok 模型 ID**。官方是 `grok-imagine-image-2.0`（旧的 `grok-imagine-image-quality` 计划 2026-11-02 退役，`grok-imagine-image` 是快速档），中转常见别名如 `image-2`，以你的服务商为准。
+
+官方请求参数（`/images/edits`，`Content-Type: application/json`）：
 
 | 参数 | 作用 | 官方取值 |
 | --- | --- | --- |
-| `resolution` | 输出分辨率 | `1k`（默认）/ `2k`；API 参考里还有 `1.5k` |
-| `quality` | 渲染档位（2.0 新增，旧模型不支持） | `low` / `medium` / `auto`（默认 `auto`：生图按 `low`、改图按 `medium` 计费） |
-| `n` | 张数 | 1–10（插件按任务张数覆盖） |
+| `image` / `images` | 参考图，两者互斥 | `{url}` 或 `[{url}, …]`；`url` 为公网地址或 base64 data URL |
+| `aspect_ratio` | 出图比例 | `1:1`、`3:4`、`4:3`、`9:16`、`16:9`、`2:3`、`3:2`、`9:19.5`、`19.5:9`、`9:20`、`20:9`、`1:2`、`2:1`、`21:9`、`5:2`、`auto` |
+| `resolution` | 输出分辨率 | `1k`（默认）/ `1.5k` / `2k` |
+| `quality` | 渲染档位 | `low`（默认）/ `medium` / `auto`（auto 时生图按 low、改图按 medium 计费） |
+| `n` | 张数 | 插件按任务张数覆盖 |
 | `response_format` | 返回格式 | `url`（默认）/ `b64_json` |
-| `nsfw`、`providerOptions` 等 | 各家中转私有 | 以服务商文档为准 |
+| `nsfw`、`providerOptions` 等 | 各家中转私有 | 写进节点「自定义参数」，以服务商文档为准 |
 
-参考图走 `/images/edits`。**官方口径是 JSON**（xAI 明确不支持 OpenAI SDK 的 multipart `images.edit()`）：单图 `image: {url}`、多图 `images: [{url}, …]`，`url` 可以是公网地址或 base64 data URL，多图时提示词里用 `<IMAGE_0>`、`<IMAGE_1>`… 按顺序指代，最多 5 张，省略 `aspect_ratio` 时沿用第一张输入图的比例。只收 multipart 的中转（如 pipiwang）在自定义参数里写 `edit_mode=multipart` 就会切回表单上传（字段名 `image`，不带 `[]`）。
+要点：
 
-别把 `deferred=true`、`storage_options`、`output.upload_urls` 写进自定义参数：它们会把响应换成 `request_id`/直传模式，插件按同步响应解析，会直接报错。有的中转只支持文生图，带参考图前先确认它支持 edits。官方该模型限流 6 请求/秒。
+- **官方没有 `size` 字段**，尺寸只由 `aspect_ratio` 决定。节点或工具里填的 `size` 会被折算成比例（像素尺寸约分，如 `1024x1024` → `1:1`）后再发，不会作为 `size` 透传——严格校验的中转会因此拒绝请求。
+- 改图**只走 JSON**（官方明确不支持 OpenAI SDK 的 multipart `images.edit()`）。多图时提示词里可用 `<IMAGE_0>`、`<IMAGE_1>` 按顺序指代，最多 5 张；省略 `aspect_ratio` 时沿用第一张输入图的比例。
+- 官方还支持用 Files API 上传后传 `image.file_id`，插件不主动使用（统一用 data URL），需要时写进自定义参数。
+- 别把 `deferred=true`、`storage_options`、`output.upload_urls` 写进自定义参数：它们会把响应换成 `request_id`/直传模式，插件按同步响应解析，会直接报错。有的中转只支持文生图，带参考图前先确认它支持 edits。官方该模型限流 6 请求/秒。
 
 参考图发送前默认压缩：长边超 1536 或体积超 600KB 缩到 1536 / JPEG 85，可在配置「图片存储」里用「发送前压缩参考图」关闭。
 
 ### Persona 数据目录
 
-参考图存放在 AstrBot 数据目录的 `plugin_data/imago/persona_references/<人设名>/`，目录名就是人设名（非法字符替换成 `_`），里面有 `persona.json` 记录真实 ID；早期版本的十六进制哈希目录会在插件启动时自动改名（如 `e7bf94e9b9a4` → `翔鹤`）。
+参考图存放在 AstrBot 数据目录的 `plugin_data/imago/persona_references/<人设名>/`，目录名就是人设名（非法字符替换成 `_`），里面有 `persona.json` 记录真实 ID；早期版本的十六进制哈希目录会在插件启动时自动改名（如 `1f2e3d4c5b6a` → `persona_demo`）。
 
 ### 参考图总上限
 
@@ -76,7 +81,7 @@ Grok Imagine 的中转都沿用 GPT-Image 的**端点**，但模型 ID 和参数
 | `/imago help` | 查看按用途和当前权限分组的帮助卡片；渲染失败时回退纯文本 |
 | `/imago draw <提示词>`、`/画 <提示词>` | 普通绘图 |
 | `/imago photo <画面要求>`、`/拍照 <画面要求>` | 当前 Persona 出镜 |
-| `/imago status` | 查看自己的任务 |
+| `/imago status` | 查看自己的任务（含参考图数量与分配、剩余预算、失败原因） |
 | `/imago quota help/show/sign` | 查看、查询或签到 |
 | `/imago quota add/del/set <用户 ID> <整数>` | 管理员调额 |
 | `/imago ref-upload` | 上传 Persona 参考图 |
@@ -106,9 +111,35 @@ Grok Imagine 的中转都沿用 GPT-Image 的**端点**，但模型 ID 和参数
 - Persona 识图 Provider 只在 Plugin Page 手动勾选图片并重建摘要时使用，且必须支持图片输入。
 - 任务会读取当前消息、引用消息和正文中的参考图，来源支持本地路径、HTTP(S)、`data:` 与 `base64://`。引用消息图片在事件处理阶段前台解析并并入任务参考图：只有引用 id 且无正文、或正文含 `[图片]` 等占位时按严格模式处理，提取不到图片会返回“引用消息图片无法获取”；明确为纯文字引用时保持宽松。
 - 参考图在事件阶段完成本地化接管与去重，无法解析时任务严格失败，不会静默退化为纯文生图；远程图下载后同样按文件魔数识别格式，空响应或内容不是图片会严格失败，头部 MIME 与内容不一致时以内容魔数为准。
-- 显式参考图存在时，最终 prompt 会自动追加低优先级关系声明：前 N 张是用户指定参考、其余是人设固定图。`optimizer_config.reference_caption`（默认关闭）开启后，还会用识图 Provider 为参考图生成视觉描述——拍照任务并入副脑输入，普通绘图以低优先级段落追加到最终 prompt；识图失败自动跳过，不影响任务。
+- 有参考图时，最终 prompt 会自动追加低优先级关系声明：前 N 张是用户指定参考、其余是人设身份参考；合照时逐角色点名每组张数，避免多个角色的参考图被混成一个人。`optimizer_config.reference_caption`（默认关闭）开启后，还会用识图 Provider 为参考图生成视觉描述——拍照任务并入副脑输入，普通绘图以低优先级段落追加到最终 prompt；识图失败自动跳过，不影响任务。
 - 任务输入、输出和去身份化 manifest 位于 `plugin_data/imago/task_cache/<task_id>/`。
 - Persona 出镜默认采用自然第三方视角（他拍观感）：平视或轻微俯仰的中景/全景，仿佛画面外的摄影师拍摄，避免默认怼脸自拍或特写；用户明确要求自拍、特写或指定机位/视角时始终以用户为准。副脑关闭且未启用降级注入时，视角由用户描述决定。
+
+### 手动新增的本地角色
+
+- 人设只在 AstrBot 里维护，但「想让她出镜」的角色不一定有人设。插件页可以对本地角色单独建档：
+  只填名字，参考图照常上传，**不需要也不允许填写人设 Prompt**。
+- 摘要与人设角色同一套语义：勾了什么就用什么。本地角色没有 Prompt，**没勾选参考图时「重建
+  外观摘要」不可用**（既无提示词又无图，无从生成），此时直接手动填写；勾选参考图后点
+  「重建外观摘要」才会把这些图交给识图 Provider。
+- 本地角色只存在插件的 `plugin_data/imago/persona_references/<角色名>/`，与 AstrBot 人设互不影响。
+  以后 AstrBot 里出现**同名** persona 时，角色名会对上：人设 Prompt 自动接管，参考图与摘要沿用本地这份，
+  等于无缝合并，不需要重新上传。
+- 本地角色只能作为合照的**客串**；主角色仍由当前会话的 AstrBot 人设决定。
+
+### 与其他 Persona 合照
+
+- 当前会话 Persona 可以和其他已保存的 Persona 同框。主 LLM 先用工具 `list_local_persona`
+  查本地有哪些角色（查询支持短名匹配并标注各自参考图与摘要状态，返回条数由 `limit` 控制，
+  默认 5），再把名字填进 `generate_persona_image` 的 `companions`（逗号分隔）。
+- `companions` 要求与本地 Persona 名字**完全一致**：不做模糊替换，名字不对会直接失败并给出
+  最接近的候选（如「乙鹤」提示「甲鹤」）。
+- 可同框人数 = min(「人设与合照」里的「合照最多客串角色数」，主节点参考图上限 − 1)：
+  每个角色至少占 1 张参考图，名额不够时会直接拒绝提交，而不是让某人只靠文字出镜。
+- 合照时每个角色都写进 prompt 的稳定外观段，参考图按角色顺序发送；`reference_image_limit`
+  的名额按角色轮转分配，每个角色先分到一张，避免名额被图多的角色占满。
+- 角色名匹配不到、或本地既没有人设提示词也没有外观摘要时，任务创建直接失败并给出原因，
+  不会静默退化成单人出镜。
 
 ### 副脑优化原理
 
@@ -177,9 +208,11 @@ Grok Imagine 的中转都沿用 GPT-Image 的**端点**，但模型 ID 和参数
 
 ## 任务、页面与日志
 
-`generate_image` 和 `generate_persona_image` 只创建后台任务；成功返回不代表已生成或平台已确认送达。Plugin Page 提供 Persona、图片节点和额度三个管理区域；额度表可按任意列升降序排列，只维护稳定的用户 ID，不缓存昵称。
+`generate_image` 和 `generate_persona_image` 只创建后台任务；成功返回不代表已生成或平台已确认送达。Plugin Page 提供 Persona、图片节点、额度和任务四个管理区域；额度表可按任意列升降序排列，只维护稳定的用户 ID，不缓存昵称。
 
-任务进度只通过 `/imago status` 查询。插件不会向主 LLM 注入后台任务状态、阶段或最近任务信息。
+**任务页**：按更新时间倒序列出最近 30 个任务，每条显示结果缩略图（点击打开全屏大图，Esc 或点背景关闭）、类型、输入/输出张数、参考图在各角色间的分配、错误类型与时间。状态用三档颜色区分——成功为绿、超时为琥珀、失败/投递失败/无输出/取消为红，运行中为中性灰。数据只读 `task_cache/<task_id>/task.json`，不展示用户身份信息。
+
+任务进度可通过 `/imago status` 查询（含参考图数量与分配、剩余超时预算、失败原因），或在 Plugin Page 的任务页查看。插件不会向主 LLM 注入后台任务状态、阶段或最近任务信息。
 
 至少一张图片成功落盘才算生成成功；Provider 成功响应却没有可识别图片，或所有结果均无法落盘时，任务为 `no_output`，仍可继续模型 fallback，但最终不按普通失败退款。失败通知是否发送成功会单独写入 manifest。主动发送会补跑装饰链，兼容 BubbleReply 这类通过 `event.send()` 发前置分段的插件；任一前置分段失败时仍尽量发送剩余主链，但整次投递不会误记成功。
 
@@ -225,7 +258,7 @@ DEBUG 会记录阶段、节点和具体模型、成功/失败、参考图数量�
 - 尺寸/比例是一个输入框，四种写法都收：像素（`1024x1024`）、比例（`16:9`）、`auto`、留空；**留空 = 不发送该字段**。
 - 质量是下拉框（没有空白项）：`openai_image` 默认 `auto`、`xai_image` 只有 `low`/`medium` 默认 `medium`；勾选框不勾是不发送，勾上发 `true`（JSON 布尔，不是字符串）。
 - 尺寸的优先级：本轮工具/主 LLM 显式传了 `size` 就用它，否则用节点里填的值。
-- `xai_image` 同时发 `size` 和 `aspect_ratio`：不同站点认的参数不同，两个都发；像素值会约分（`1024x1024` → `1:1`）。
+- `xai_image` **只发 `aspect_ratio`**：官方没有 `size` 字段，节点/工具里填的像素尺寸会约分折算成比例（`1024x1024` → `1:1`）。
 - 旧配置里的其他键不会被丢掉：节点下方会提示「另有未识别参数（原样发送）」，保存后照旧生效；`custom_endpoint` 除了尺寸还有自由参数文本框，其余键原样透传。
 - `model`/`prompt`/`n` 由插件按本轮请求写死，不是可配置项。
 - 同一份配置在两处都能改：插件页（下拉/勾选）和 AstrBot「插件配置」页的「尺寸 / 质量 / 启用 NSFW」三个字段值互通；`custom_params` 文本框只在 `custom_endpoint` 类型下出现。

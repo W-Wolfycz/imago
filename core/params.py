@@ -50,7 +50,8 @@ PARAM_FIELDS: dict[str, list[dict[str, Any]]] = {
             "default": "medium",
             "options": [
                 "low",
-                "medium"
+                "medium",
+                "auto"
             ]
         },
         {

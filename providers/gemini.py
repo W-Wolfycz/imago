@@ -56,7 +56,11 @@ class GeminiAdapter(ProviderAdapter):
         if "imageSize" in image_config:
             # 官方 schema 里 imageSize 是字符串（512/1K/2K/4K），自定义参数按 JSON 解析会变数字
             image_config["imageSize"] = str(image_config["imageSize"])
-        ratio = _aspect_ratio(self.request_size(request))
+        # 工具/指令传入的附加参数也要生效（此前只读节点自定义参数，等于静默丢弃）
+        for key, value in (request.extra_params or {}).items():
+            image_config.setdefault(key, value)
+        # 显式 aspect_ratio 优先于 size 折算
+        ratio = _aspect_ratio(str(request.aspect_ratio or "").strip() or self.request_size(request))
         if ratio and "aspectRatio" not in image_config:
             image_config["aspectRatio"] = ratio
         generation: dict = {"responseModalities": ["TEXT", "IMAGE"]}

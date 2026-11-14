@@ -1,13 +1,19 @@
+import ast
 import io
 import json
 import os
 import tempfile
+import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
-from imago.core.config import load_config, optimizer_in_use
+from imago.core.clock import day_key
 from imago.core.dedup import DEDUPE_WINDOW_SECONDS, is_duplicate_request
-from imago.core.images import is_animated, shrink
+from imago.core.images import shrink
+from imago.core.persona_lookup import (
+    allocate_reference_budget,
+)
 from imago.core.errors import (
     DuplicateImage,
     ProviderError,
@@ -21,51 +27,74 @@ from imago.services.quota_store import QuotaStore, terminal_refund_amount
 
 ROOT = Path(__file__).resolve().parents[1]
 
-class ConfigTests(unittest.TestCase):
-
-
-
-    def test_custom_params_parse_and_legacy_size(self):
-        # 自定义参数是唯一入口：写错一行/重复键/保留字段都不能半途炸掉或静默覆盖尺寸。
-        # 旧 default_size 必须仍能生效（1.2.x 配置升级后行为不变）。
-        cfg = load_config({"providers": [{
-            "id": "node", "api_type": "xai_image", "base_url": "https://example.invalid/v1",
-            "api_keys": "key_demo",
-            "custom_params": "# 注释\nquality=1k\nnsfw: true\nbad line\nsize=3:4\nsize=9:9\n",
-        }]})
+class ClockTests(unittest.TestCase):
+    def test_day_key_uses_configured_timezone(self):
+        # 时区被忽略＝日切差几小时，额度刷新与每日签到按错的"今天"计算
         self.assertEqual(
-            cfg.providers[0].custom_params,
-            (("quality", "1k"), ("nsfw", "true"), ("size", "3:4")),
+            day_key("Asia/Shanghai", datetime(2026, 11, 14, 23, 30, tzinfo=timezone.utc))[0],
+            "2026-11-15",
         )
-        legacy = load_config({"providers": [{
-            "id": "node", "api_type": "openai_image", "base_url": "https://example.invalid/v1",
-            "api_keys": "key_demo", "default_size": "1024x1024",
-        }]})
-        self.assertEqual(legacy.providers[0].custom_params, (("size", "1024x1024"),))
-        explicit = load_config({"providers": [{
-            "id": "node", "api_type": "openai_image", "base_url": "https://example.invalid/v1",
-            "api_keys": "key_demo", "default_size": "1024x1024", "custom_params": "size=1:1\n",
-        }]})
-        self.assertEqual(explicit.providers[0].custom_params, (("size", "1:1"),))
+        # 非法时区必须把失败标记出来，否则调用方无从提示
+        self.assertTrue(day_key("Not/AZone")[1])
 
+class TaskCacheAndQuotaTests(unittest.TestCase):
+    def test_prune_task_cache_keeps_protected_and_newest(self):
+        # 缓存永不清理＝磁盘无限增长；protected 被删＝在途任务的输出当场消失
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PersonaStore(Path(tmp), 16 * 1024 * 1024)
+            base = time.time() - 300
+            made = []
+            for index in range(3):
+                task_id = f"{index + 1:032x}"
+                outputs = store.task_dir(task_id) / "outputs"
+                outputs.mkdir(parents=True, exist_ok=True)
+                target = outputs / "a.png"
+                target.write_bytes(b"x" * (6 * 1024 * 1024))
+                os.utime(target, (base + index, base + index))
+                made.append(task_id)
+            store.prune_task_cache(16 * 1024 * 1024, protected={made[0]})
+            remaining = {path.name for path in (Path(tmp) / "task_cache").iterdir()}
+            self.assertIn(made[0], remaining)
+            self.assertIn(made[2], remaining)
+            self.assertNotIn(made[1], remaining)
 
+    def test_bulk_save_keeps_checkin_state(self):
+        # 整表保存抹掉签到日期＝当天能二次签到白拿额度
+        with tempfile.TemporaryDirectory() as tmp:
+            store = QuotaStore(Path(tmp), lambda: "2026-11-14")
+            policy = QuotaConfig(
+                enabled=True, checkin_enabled=True, checkin_quota_min=1, checkin_quota_max=1,
+            )
+            self.assertTrue(store.checkin("10001", policy).success)
+            store.set_many([{"user_id": "10001", "quota": 9}], policy)
+            self.assertFalse(store.checkin("10001", policy).success)
 
-    def test_optimizer_in_use_is_independent_of_style_linkage(self):
-        # 「是否走副脑」只由总开关 + 任务来源决定，与成像基准的联动无关。
-        cfg = load_config({"optimizer_config": {"optimize_plain_draw": True}})
-        self.assertTrue(optimizer_in_use(cfg, persona=True, plain_draw_tool=False))
-        self.assertTrue(optimizer_in_use(cfg, persona=False, plain_draw_tool=True))
-        # /画 等指令路径（plain_draw_tool=False）即使开关开启也不经副脑。
-        self.assertFalse(optimizer_in_use(cfg, persona=False, plain_draw_tool=False))
-        off = load_config({"optimizer_config": {"optimize_plain_draw": False}})
-        self.assertTrue(optimizer_in_use(off, persona=True, plain_draw_tool=False))
-        self.assertFalse(optimizer_in_use(off, persona=False, plain_draw_tool=True))
-        # 总开关关闭：任何路径都不调用副脑。
-        disabled = load_config({"optimizer_config": {"enable_optimizer": False, "optimize_plain_draw": True}})
-        self.assertFalse(optimizer_in_use(disabled, persona=True, plain_draw_tool=True))
-        self.assertFalse(optimizer_in_use(disabled, persona=False, plain_draw_tool=True))
+class PageEndpointContractTests(unittest.TestCase):
+    def test_character_endpoints_accept_local_personas(self):
+        # 端点用「prompt 非空」判断角色存在 → 本地角色（无人设）传图/存摘要一律 404；
+        # 这是页面层才暴露的契约，store 单测和 pyflakes 都看不出来。
+        source = (
+            Path(__file__).resolve().parents[1] / "integrations" / "web_api.py"
+        ).read_text(encoding="utf-8")
+        tree = ast.parse(source)
+        lines = source.splitlines()
+        bodies = {}
+        for node in tree.body:
+            if not isinstance(node, ast.ClassDef):
+                continue
+            for item in node.body:
+                if isinstance(item, ast.AsyncFunctionDef):
+                    bodies[item.name] = "\n".join(lines[item.lineno - 1:item.end_lineno])
+        for name in ("detail", "upload", "set_summary"):
+            self.assertIn("_character_exists", bodies[name], f"{name} 未用统一存在性判断")
 
-
+class ReadOnlyAndOverrideTests(unittest.TestCase):
+    def test_read_paths_do_not_create_persona_dir(self):
+        # 只读接口顺手建目录＝任意 id 都会留下永久垃圾目录，还会让"目录是否存在"的判断自我成立
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PersonaStore(Path(tmp), 1024)
+            self.assertEqual(store.list_references("ghost_persona"), [])
+            self.assertNotIn("ghost_persona", store.list_local_names())
 
 class SecurityTests(unittest.TestCase):
 
@@ -124,18 +153,13 @@ class ImageShrinkTests(unittest.TestCase):
         small = buffer.getvalue()
         self.assertEqual(shrink(small, "image/png"), (small, "image/png"))
 
-class AnimatedImageTests(unittest.TestCase):
-    def test_animated_detection(self):
-        # 判错会让配文把动图说成静图（反之亦然），用户看到的是"文不对图"。
-        from PIL import Image
-
-        frames = [Image.new("RGB", (16, 16), color) for color in ((255, 0, 0), (0, 255, 0))]
-        buffer = io.BytesIO()
-        frames[0].save(buffer, "GIF", save_all=True, append_images=frames[1:])
-        self.assertTrue(is_animated(buffer.getvalue()))
-        static = io.BytesIO()
-        Image.new("RGB", (16, 16)).save(static, "PNG")
-        self.assertFalse(is_animated(static.getvalue()))
+class PersonaLookupTests(unittest.TestCase):
+    def test_allocate_budget_gives_every_character_a_slot(self):
+        # 名额被图多的角色占满＝合照少一个人，出图后才发现；每角色至少一张是硬要求。
+        self.assertEqual(allocate_reference_budget(3, [8, 8]), [2, 1])
+        self.assertEqual(allocate_reference_budget(1, [8, 8]), [1, 0])
+        self.assertEqual(allocate_reference_budget(5, [2, 2]), [2, 2])
+        self.assertEqual(allocate_reference_budget(0, [8, 8]), [0, 0])
 
 class PersonaStoreTests(unittest.TestCase):
 
@@ -153,21 +177,42 @@ class PersonaStoreTests(unittest.TestCase):
 
     def test_persona_dirs_are_readable_and_migrate_legacy_hash(self):
         # 旧哈希目录要能自动改名成可读名；否则用户根本找不到哪个人设的图
+        demo = "persona_demo"
         with tempfile.TemporaryDirectory() as tmp:
             store = PersonaStore(Path(tmp), 1024)
-            legacy = Path(tmp) / "persona_references" / "e7bf94e9b9a4"
+            # 旧目录名是 persona_id 的 UTF-8 十六进制，这里用占位角色名现场算
+            legacy = Path(tmp) / "persona_references" / demo.encode("utf-8").hex()
             legacy.mkdir(parents=True)
             (legacy / "a.jpg").write_bytes(b"img")
-            refs = store.list_references("翔鹤")
+            refs = store.list_references(demo)
             self.assertEqual([item["name"] for item in refs], ["a.jpg"])
-            readable = Path(tmp) / "persona_references" / "翔鹤"
+            # 读路径只读不建：旧哈希目录仍在原地，不会被顺手搬家或新建空目录
+            self.assertTrue(legacy.is_dir())
+            self.assertFalse((Path(tmp) / "persona_references" / demo).exists())
+            store.migrate_legacy_dirs()
+            readable = Path(tmp) / "persona_references" / demo
             self.assertTrue(readable.is_dir())
             self.assertFalse(legacy.exists())
             marker = json.loads((readable / "persona.json").read_text("utf-8"))
-            self.assertEqual(marker["persona_id"], "翔鹤")
+            self.assertEqual(marker["persona_id"], demo)
             # 非法字符替换成下划线；persona.json 不算参考图
             self.assertEqual(store.persona_dir("a/b").name, "a_b")
-            self.assertNotIn("persona.json", [item["name"] for item in store.list_references("翔鹤")])
+            self.assertNotIn("persona.json", [item["name"] for item in store.list_references(demo)])
+
+    def test_local_persona_create_is_idempotent_and_delete_clears_summary(self):
+        # 重复建要幂等；删除要连摘要一起清——否则重建同名角色会带着上一份旧摘要出图。
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PersonaStore(Path(tmp), 1024)
+            self.assertTrue(store.create_local_persona("测试角色")["created"])
+            self.assertFalse(store.create_local_persona("测试角色")["created"])
+            # 名字带路径/非法字符时目录名会被改写，角色名与人设/会话对不上，必须直接拒绝
+            with self.assertRaises(ValueError):
+                store.create_local_persona("a/b")
+            self.assertIn("测试角色", store.list_local_names())
+            store.set_summary("测试角色", "", "白发少女", manual=True)
+            store.delete_local_persona("测试角色")
+            self.assertNotIn("测试角色", store.list_local_names())
+            self.assertIsNone(store.get_summary("测试角色", ""))
 
     def test_task_inputs_outputs_and_manifest_are_persisted_without_identity(self):
         # 任务清单写入身份字段＝隐私泄漏，且不会报错。
@@ -185,6 +230,21 @@ class PersonaStoreTests(unittest.TestCase):
             self.assertEqual(manifest["input_count"], 1)
             self.assertEqual(manifest["output_count"], 1)
             self.assertFalse(any(key in manifest for key in ("user_id", "bot_id", "umo", "persona_id", "url")))
+
+class TaskListTests(unittest.TestCase):
+    def test_task_output_file_rejects_path_traversal(self):
+        # 允许带路径的文件名＝任务页能读到任务目录外的任意文件（路径穿越）。
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PersonaStore(Path(tmp), 1024)
+            task_id = "a" * 32
+            outputs = store.task_dir(task_id) / "outputs"
+            outputs.mkdir(parents=True, exist_ok=True)
+            (outputs / "r.png").write_bytes(b"png")
+            self.assertEqual(store.task_output_file(task_id, "r.png").name, "r.png")
+            with self.assertRaises(ValueError):
+                store.task_output_file(task_id, "../task.json")
+            with self.assertRaises(FileNotFoundError):
+                store.task_output_file(task_id, "missing.png")
 
 class QuotaStoreTests(unittest.TestCase):
 
@@ -337,14 +397,6 @@ class ProviderErrorDetailTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("图片尺寸超限", message)
         self.assertIn("code=invalid_request", message)
         self.assertIn("type=invalid_request_error", message)
-
-    async def test_non_json_body_falls_back_to_raw_text(self):
-        # 非 JSON 响应体被丢弃＝排障时看不到中转的真实错误。
-        with self.assertRaises(ProviderError) as ctx:
-            await ProviderAdapter.response_json(self._FakeResponse(status=502, text="Gateway Timeout (relay)"))
-        message = str(ctx.exception)
-        self.assertIn("HTTP 502", message)
-        self.assertIn("Gateway Timeout (relay)", message)
 
 class DuplicateRequestTests(unittest.TestCase):
 

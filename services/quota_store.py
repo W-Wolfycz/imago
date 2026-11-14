@@ -281,7 +281,10 @@ class QuotaStore:
                 self._save(value)
             return rows
 
-    def set_many(self, items: Iterable[dict], policy: QuotaConfig) -> list[dict]:
+    def set_many(
+        self, items: Iterable[dict], policy: QuotaConfig, *, prune: bool = False,
+    ) -> list[dict]:
+        """整表保存；``prune=True`` 时把提交里没有的 ID 视为被删除。"""
         normalized = []
         seen = set()
         for item in items:
@@ -298,6 +301,11 @@ class QuotaStore:
         with self._lock:
             value = self._load()
             today = self.today_provider()
+            if prune:
+                keep = {user_id for user_id, _ in normalized}
+                value["users"] = {
+                    key: record for key, record in value["users"].items() if key in keep
+                }
             for user_id, quota in normalized:
                 record = self._record(value["users"], user_id)
                 record["quota"] = quota

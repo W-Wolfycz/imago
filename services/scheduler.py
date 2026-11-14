@@ -16,6 +16,7 @@ except ImportError:  # 允许在不含 AstrBot 运行依赖的源码环境运行
 
 from ..core.errors import ConfigurationError, NoOutputError, ProviderError
 from ..core.models import DrawTask, ImageResult, TaskStage, TaskState
+from ..core.persona_lookup import allocate_reference_budget
 from ..core.prompting import (
     REFERENCE_RELATION_SUFFIX,
     REFERENCE_SUFFIX_MARKER,
@@ -113,15 +114,31 @@ class TaskScheduler:
         """Build the request for one model attempt, sampling Persona references if configured."""
         explicit_references = list(task.request.references)
         persona_references = list(task.runtime.get("persona_references", []) or [])
+        groups = [item for item in (task.runtime.get("persona_reference_groups") or [])
+                  if item and item[1]]
         limit = max(0, int(getattr(provider, "reference_image_limit", 0) or 0))
+        group_counts: list[tuple[str, int]] = []
         if limit > 0:
             persona_budget = max(0, limit - len(explicit_references))
-            selected_persona = random.sample(
-                persona_references,
-                min(persona_budget, len(persona_references)),
-            ) if persona_budget else []
+            if groups:
+                # 多人合照：名额按角色轮转，每个角色先分到一张，避免名额被
+                # 图多的角色占满、另一个人只剩纯文字（出图少人且不报错）。
+                quotas = allocate_reference_budget(
+                    persona_budget, [len(items) for _, items in groups])
+                selected_persona = []
+                for (label, items), quota in zip(groups, quotas):
+                    picked = random.sample(items, quota) if quota < len(items) else list(items)
+                    selected_persona.extend(picked)
+                    group_counts.append((label, len(picked)))
+            else:
+                selected_persona = random.sample(
+                    persona_references,
+                    min(persona_budget, len(persona_references)),
+                ) if persona_budget else []
         else:
             selected_persona = persona_references
+            if groups:
+                group_counts = [(label, len(items)) for label, items in groups]
         references = [*explicit_references, *selected_persona]
         prompt = task.request.prompt
         appended = any(
@@ -131,13 +148,16 @@ class TaskScheduler:
             # 低优先级关系声明按本节点实际采样数量追加：前 N 张是用户指定参考、
             # 其余是人设固定图，避免模型在图片较多时默认跟随人设图（按全量池
             # 计数会在 reference_image_limit 采样后数量虚高）。
-            prompt = (
-                f"{prompt}\n\n"
-                f"{reference_relation_suffix(len(explicit_references), len(selected_persona))}"
-            )
+            relation = reference_relation_suffix(
+                len(explicit_references), len(selected_persona), group_counts)
+            prompt = f"{prompt}\n\n{relation}"
+        if group_counts:
+            # 名额不足时某些角色会分到 0 张（只能靠文字摘要），写进清单供事后排查。
+            task.runtime["persona_reference_allocation"] = {
+                label: count for label, count in group_counts
+            }
         task.runtime["current_explicit_reference_count"] = len(explicit_references)
         task.runtime["current_persona_reference_count"] = len(selected_persona)
-        task.runtime["current_reference_count"] = len(references)
         return replace(task.request, references=references, prompt=prompt)
 
     @staticmethod

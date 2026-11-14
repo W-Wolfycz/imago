@@ -13,6 +13,30 @@ class DummySession: pass
 
 class SchedulerTests(unittest.IsolatedAsyncioTestCase):
 
+    def test_grouped_persona_references_sampled_per_character(self):
+        # 分组存在时若仍按全池随机抽样，名额可能全被图多的角色占满，
+        # 另一个角色一张都进不去（出图少人不报错）。
+        persona_groups = [
+            ("演示角色甲", [ImageInput(b"a1", "image/png", "a1.png"),
+                        ImageInput(b"a2", "image/png", "a2.png")]),
+            ("演示角色乙", [ImageInput(b"b1", "image/png", "b1.png")]),
+        ]
+        provider = ProviderConfig(
+            "node", "custom_endpoint", "https://example.invalid", ("key",),
+            model="model", reference_image_limit=2,
+        )
+        task = DrawTask("task", "umo", GenerationRequest("x"))
+        task.persona_id = "演示角色甲"
+        task.runtime["persona_references"] = [item for _, group in persona_groups for item in group]
+        task.runtime["persona_reference_groups"] = persona_groups
+        with patch.object(
+            scheduler_module.random, "sample", side_effect=lambda items, count: items[:count],
+        ):
+            request = TaskScheduler._request_for_attempt(task, provider)
+        self.assertEqual(len(request.references), 2)
+        self.assertIn("1 for 演示角色甲", request.prompt)
+        self.assertIn("1 for 演示角色乙", request.prompt)
+
     async def test_disabled_provider_is_skipped(self):
         # 停用节点仍被调度＝"临时禁用"变成无效开关，请求白白打到它身上（状态可见性为零）
         tried = []
@@ -448,6 +472,46 @@ class SchedulerTests(unittest.IsolatedAsyncioTestCase):
             await scheduler.close()
             if old is None: scheduler_module.ADAPTERS.pop("custom_endpoint", None)
             else: scheduler_module.ADAPTERS["custom_endpoint"] = old
+
+
+
+class ZeroLimitTests(unittest.TestCase):
+    def test_zero_limit_sends_every_reference(self):
+        # 0=不限却被当成名额裁剪＝人设参考图静默缩水，出图不像且没有任何报错
+        groups = [
+            (name, [ImageInput(b"i", "image/png", f"{name}-{index}.png") for index in range(2)])
+            for name in ("甲", "乙")
+        ]
+        task = DrawTask("task", "umo", GenerationRequest("x"))
+        task.runtime["persona_references"] = [item for _, items in groups for item in items]
+        task.runtime["persona_reference_groups"] = groups
+        provider = ProviderConfig(
+            "node", "openai_image", "https://example.invalid", ("key",), reference_image_limit=0,
+        )
+        request = TaskScheduler._request_for_attempt(task, provider)
+        self.assertEqual(len(request.references), 4)
+        self.assertEqual(
+            task.runtime["persona_reference_allocation"], {"甲": 2, "乙": 2},
+        )
+
+
+
+class RecentWindowTests(unittest.TestCase):
+    def test_recent_window_keeps_terminal_tasks_for_dedupe(self):
+        # 终态任务过早移除＝同一条消息能二次提交（重复扣额度）；永不清理＝内存增长
+        scheduler = TaskScheduler(
+            lambda: RuntimeConfig(providers=()), DummySession(), lambda *_: True, lambda *_: None,
+        )
+        task = DrawTask(
+            "task", "umo", GenerationRequest("x"), owner_user_id="u", bot_instance_id="b",
+        )
+        task.state = TaskState.SUCCEEDED
+        key = {"umo": "umo", "owner_user_id": "u", "bot_instance_id": "b"}
+        self.assertEqual(scheduler.query(**key), [])
+        scheduler.recent[task.id] = (task, time.monotonic() + 10)
+        self.assertEqual(len(scheduler.query(**key)), 1)
+        scheduler.recent[task.id] = (task, time.monotonic() - 1)
+        self.assertEqual(scheduler.query(**key), [])
 
 
 

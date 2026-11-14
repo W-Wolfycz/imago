@@ -6,12 +6,16 @@ from collections.abc import Mapping
 
 from quart import jsonify, request
 
+from astrbot.api import logger
+
 from ..core.config import (
+    API_TYPES,
     TYPED_KEYS_BY_API,
     load_config,
     provider_custom_params,
     split_custom_params,
 )
+from ..core.images import thumbnail
 from ..core.params import PARAM_FIELDS
 from ..core.errors import DuplicateImage
 
@@ -50,9 +54,68 @@ class PageAPI:
 
     async def personas(self):
         try:
-            return _ok(personas=[{"id": value} for value in await self.plugin.list_persona_ids()])
-        except Exception:
+            astrbot_ids = set(await self.plugin.list_persona_ids())
+            local_ids = set(self.plugin.store.list_local_names())
+            merged = sorted(astrbot_ids | local_ids)
+            return _ok(
+                personas=[{"id": value} for value in merged],
+                sources={
+                    value: ("persona" if value in astrbot_ids else "local") for value in merged
+                },
+            )
+        except Exception as exc:
+            logger.warning(
+                "[Imago] PageAPI %s 失败 type=%s", "personas", type(exc).__name__,
+            )
             return _err("无法读取 Persona 列表", 500)
+
+    async def create_local_persona(self):
+        """手动新增本地角色：只建名字，不需要人设 Prompt。"""
+        try:
+            body = await request.get_json(force=True)
+            name = str((body or {}).get("name", "")).strip()
+            if not name:
+                return _err("角色名不能为空")
+            result = self.plugin.store.create_local_persona(name)
+            return _ok(**result)
+        except ValueError as exc:
+            return _err(str(exc))
+        except Exception as exc:
+            logger.warning(
+                "[Imago] PageAPI %s 失败 type=%s", "create_local_persona", type(exc).__name__,
+            )
+            return _err("无法新增本地角色", 500)
+
+    async def delete_local_persona(self):
+        """删除本地角色目录；AstrBot 里有人设时拒绝，避免误删与素材无关的东西。"""
+        try:
+            body = await request.get_json(force=True)
+            name = str((body or {}).get("persona_id", "")).strip()
+            if not name:
+                return _err("persona_id 无效")
+            if await self.plugin.get_persona_prompt(name):
+                return _err("该角色在 AstrBot 里有人设，不能在这里删除")
+            self.plugin.store.delete_local_persona(name)
+            return _ok(persona_id=name)
+        except FileNotFoundError:
+            return _err("本地没有这个角色", 404)
+        except Exception as exc:
+            logger.warning(
+                "[Imago] PageAPI %s 失败 type=%s", "delete_local_persona", type(exc).__name__,
+            )
+            return _err("无法删除本地角色", 500)
+
+    async def _character_exists(self, persona_id: str) -> bool:
+        """角色是否存在：AstrBot 有人设，或本地已有对应目录（只读，不建目录）。
+
+        本地角色没有人设 prompt，用它替代「prompt 非空」的存在性判断，否则上传参考图、
+        保存手工摘要这些基础操作都会对本地角色返回「Persona 不存在」。
+        """
+        if not persona_id:
+            return False
+        if await self.plugin.get_persona_prompt(persona_id):
+            return True
+        return persona_id in self.plugin.store.list_local_names()
 
     async def detail(self):
         persona_id = str(request.args.get("persona_id", "")).strip()
@@ -60,25 +123,32 @@ class PageAPI:
             return _err("persona_id 无效")
         try:
             prompt = await self.plugin.get_persona_prompt(persona_id)
-            if not prompt:
-                return _err("Persona 不存在或 prompt 为空", 404)
             item = self.plugin.store.get_summary(persona_id, prompt)
+            references = self.plugin.store.list_references(persona_id)
+            # 刚新建的本地角色可能既没图也没摘要，只要目录在就算存在——否则前端拿到 404
+            # 会保留上一个角色的内容（实测踩过）。
+            if not prompt and not references and not await self._character_exists(persona_id):
+                return _err("角色不存在", 404)
             return _ok(
                 persona_id=persona_id,
                 prompt=prompt,
+                source="persona" if prompt else "local",
                 summary=(item or {}).get("summary", ""),
                 summary_manual=bool((item or {}).get("manual", False)),
-                references=self.plugin.store.list_references(persona_id),
+                references=references,
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "[Imago] PageAPI %s 失败 type=%s", "detail", type(exc).__name__,
+            )
             return _err("无法读取 Persona 素材", 500)
 
     async def upload(self):
         try:
             body = await request.get_json(force=True)
             persona_id = str((body or {}).get("persona_id", "")).strip()
-            if not await self.plugin.get_persona_prompt(persona_id):
-                return _err("Persona 不存在", 404)
+            if not await self._character_exists(persona_id):
+                return _err("角色不存在", 404)
             images = (body or {}).get("images", [])
             if not isinstance(images, list) or not images:
                 return _err("请选择至少一张图片")
@@ -93,7 +163,10 @@ class PageAPI:
             return _err(str(exc), 409)
         except (ValueError, binascii.Error):
             return _err("上传数据或图片格式无效")
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "[Imago] PageAPI %s 失败 type=%s", "upload", type(exc).__name__,
+            )
             return _err("上传失败", 500)
 
     async def delete(self):
@@ -103,7 +176,10 @@ class PageAPI:
             return _ok("已删除")
         except (ValueError, FileNotFoundError):
             return _err("文件不存在或请求不安全", 404)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "[Imago] PageAPI %s 失败 type=%s", "delete", type(exc).__name__,
+            )
             return _err("删除失败", 500)
 
     async def preview(self):
@@ -114,7 +190,10 @@ class PageAPI:
             return _ok(mime_type=mime, base64_data=encoded, data_url=f"data:{mime};base64,{encoded}")
         except (ValueError, FileNotFoundError):
             return _err("图片不存在", 404)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "[Imago] PageAPI %s 失败 type=%s", "preview", type(exc).__name__,
+            )
             return _err("无法读取图片", 500)
 
     async def rebuild(self):
@@ -122,11 +201,24 @@ class PageAPI:
             body = await request.get_json(force=True)
             persona_id = str((body or {}).get("persona_id", "")).strip()
             reference_names = (body or {}).get("reference_names", [])
+            if not persona_id or len(persona_id) > 256:
+                return _err("persona_id 无效")
             if not isinstance(reference_names, list):
                 return _err("参考图选择格式无效")
-            summary = await self.plugin.rebuild_summary(persona_id, reference_names)
+            # 页面上刚选的 Provider 直接生效，不必先点「保存配置」再回来重建
+            summary = await self.plugin.rebuild_summary(
+                persona_id,
+                reference_names,
+                vision_provider_id=str((body or {}).get("vision_provider_id", "")).strip(),
+                optimizer_provider_id=str((body or {}).get("optimizer_provider_id", "")).strip(),
+            )
             return _ok("已重建", summary=summary)
-        except Exception:
+        except ValueError as exc:
+            return _err(str(exc))
+        except Exception as exc:
+            logger.warning(
+                "[Imago] PageAPI %s 失败 type=%s", "rebuild", type(exc).__name__,
+            )
             return _err("无法重建外观摘要；请确认 Persona Prompt 和副脑 Provider 已配置", 500)
 
     async def set_summary(self):
@@ -134,15 +226,56 @@ class PageAPI:
             body = await request.get_json(force=True)
             persona_id = str((body or {}).get("persona_id", "")).strip()
             summary = str((body or {}).get("summary", "")).strip()
+            if not summary:
+                return _err("外观摘要不能为空")
+            if not await self._character_exists(persona_id):
+                return _err("角色不存在", 404)
             prompt = await self.plugin.get_persona_prompt(persona_id)
-            if not prompt:
-                return _err("Persona 不存在", 404)
             item = self.plugin.store.set_summary(persona_id, prompt, summary, manual=True)
             return _ok("手工外观摘要已保存", summary=item["summary"])
         except ValueError as exc:
             return _err(str(exc))
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "[Imago] PageAPI %s 失败 type=%s", "set_summary", type(exc).__name__,
+            )
             return _err("无法保存外观摘要", 500)
+
+    async def task_image(self):
+        """任务结果图：``size=thumb`` 给缩略图，``size=full`` 给原图。"""
+        try:
+            task_id = str(request.args.get("task_id", "")).strip()
+            name = str(request.args.get("name", "")).strip()
+            mode = str(request.args.get("size", "thumb")).strip().lower()
+            path = self.plugin.store.task_output_file(task_id, name)
+            data = path.read_bytes()
+            mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                    ".webp": "image/webp", ".gif": "image/gif"}.get(path.suffix.lower(), "image/png")
+            if mode != "full":
+                data, mime = thumbnail(data, mime)
+            encoded = base64.b64encode(data).decode()
+            return _ok(mime_type=mime, base64_data=encoded, data_url=f"data:{mime};base64,{encoded}")
+        except (ValueError, FileNotFoundError):
+            return _err("任务图片不存在", 404)
+        except Exception as exc:
+            logger.warning(
+                "[Imago] PageAPI %s 失败 type=%s", "task_image", type(exc).__name__,
+            )
+            return _err("无法读取任务图片", 500)
+
+    async def tasks(self):
+        """最近任务清单（只读 task.json：不含图片内容与身份字段）。"""
+        try:
+            try:
+                limit = max(1, min(200, int(request.args.get("limit", 30))))
+            except (TypeError, ValueError):
+                limit = 30
+            return _ok(tasks=self.plugin.store.list_tasks(limit))
+        except Exception as exc:
+            logger.warning(
+                "[Imago] PageAPI %s 失败 type=%s", "tasks", type(exc).__name__,
+            )
+            return _err("无法读取任务列表", 500)
 
     async def providers(self):
         raw_items = self.plugin.raw_config.get("providers", []) or []
@@ -180,14 +313,16 @@ class PageAPI:
             try:
                 meta = provider.meta()
                 chat_providers.append({"id": str(meta.id), "model": str(meta.model or ""), "type": str(meta.type)})
-            except Exception:
+            except Exception as exc:
+                logger.warning(
+                    "[Imago] PageAPI %s 失败 type=%s", "providers", type(exc).__name__,
+                )
                 continue
         optimizer = self.plugin.raw_config.get("optimizer_config", {}) or {}
         return _ok(
             providers=configured,
             param_fields=PARAM_FIELDS,
             primary_provider_id=effective,
-            stored_primary_provider_id=primary,
             chat_providers=chat_providers,
             optimizer_provider_id=str(optimizer.get("optimizer_provider_id", "")),
             vision_provider_id=str(optimizer.get("vision_provider_id", "")),
@@ -213,10 +348,14 @@ class PageAPI:
                 if not provider_id or provider_id in seen:
                     return _err("节点 ID 不能为空或重复")
                 api_type = str(item.get("api_type", "")).strip()
-                if api_type not in {"openai_image", "xai_image", "gemini_official",
-                                     "custom_endpoint"}:
+                if api_type not in API_TYPES:
                     return _err(f"节点 {provider_id} 的接口类型无效")
-                old = old_by_id.get(provider_id, {})
+                # 页面可以改节点 ID：优先按提交里的 original_id 找回旧记录，
+                # 否则改名会把已存密钥当成"新节点"而写成空数组（唯一节点直接停摆）。
+                original_id = str(item.get("original_id", "")).strip()
+                old = old_by_id.get(original_id) if original_id else None
+                if old is None:
+                    old = old_by_id.get(provider_id, {})
                 submitted_keys = _line_items(item.get("api_keys", []))
                 stored_keys = _line_items(old.get("api_keys", []))
                 # 旧节点只有 default_size：没写自定义参数时把旧尺寸迁成 size=…，
@@ -268,8 +407,35 @@ class PageAPI:
             return _ok("节点配置已保存", primary_provider_id=primary)
         except (TypeError, ValueError):
             return _err("超时和参考图上限必须是有效整数")
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "[Imago] PageAPI %s 失败 type=%s", "save_providers", type(exc).__name__,
+            )
             return _err("无法保存节点配置", 500)
+
+    async def save_brain_providers(self):
+        """只保存副脑 / 识图 Provider：人设页换了下拉立即生效，不牵动节点列表。"""
+        try:
+            body = await request.get_json(force=True) or {}
+            section = dict(self.plugin.raw_config.get("optimizer_config", {}) or {})
+            section["optimizer_provider_id"] = str(body.get("optimizer_provider_id", "")).strip()
+            section["vision_provider_id"] = str(body.get("vision_provider_id", "")).strip()
+            self.plugin.raw_config["optimizer_config"] = section
+            save_fn = getattr(self.plugin.raw_config, "save_config", None)
+            if not callable(save_fn):
+                return _err("当前 AstrBot 配置对象不支持持久化", 500)
+            save_fn()
+            return _ok("已生效", **{
+                "optimizer_provider_id": section["optimizer_provider_id"],
+                "vision_provider_id": section["vision_provider_id"],
+            })
+        except (TypeError, ValueError) as exc:
+            return _err(str(exc))
+        except Exception as exc:
+            logger.warning(
+                "[Imago] PageAPI %s 失败 type=%s", "save_brain_providers", type(exc).__name__,
+            )
+            return _err("无法保存 Provider 选择", 500)
 
     async def quotas(self):
         try:
@@ -283,7 +449,10 @@ class PageAPI:
                 checkin_quota_min=policy.checkin_quota_min,
                 checkin_quota_max=policy.checkin_quota_max,
             )
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "[Imago] PageAPI %s 失败 type=%s", "quotas", type(exc).__name__,
+            )
             return _err("无法读取绘图额度", 500)
 
     async def save_quotas(self):
@@ -295,23 +464,14 @@ class PageAPI:
             rows = self.plugin.quota_store.set_many(
                 items,
                 load_config(self.plugin.raw_config).quota,
+                prune=True,  # 页面上删掉的行要真的消失，否则填错的 ID 永远清不掉
             )
             return _ok("绘图额度已保存", quotas=rows)
         except (TypeError, ValueError) as exc:
             return _err(str(exc))
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "[Imago] PageAPI %s 失败 type=%s", "save_quotas", type(exc).__name__,
+            )
             return _err("无法保存绘图额度", 500)
 
-    async def set_primary_provider(self):
-        # 目前 WebUI 走 providers/save 一并提交 primary_provider_id，本路由未被
-        # 前端调用；保留作为独立 API 入口（命令 /imago provider-primary 同功能）。
-        try:
-            body = await request.get_json(force=True)
-            provider_id = str((body or {}).get("provider_id", "")).strip()
-            configured = [str(item.get("id", "")).strip() for item in (self.plugin.raw_config.get("providers", []) or []) if isinstance(item, Mapping)]
-            if provider_id not in configured:
-                return _err("图片节点不存在", 404)
-            self.plugin.store.set_primary_provider_id(provider_id)
-            return _ok("主图片节点已更新", primary_provider_id=provider_id)
-        except Exception:
-            return _err("无法保存主图片节点", 500)

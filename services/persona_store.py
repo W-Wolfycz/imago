@@ -93,6 +93,51 @@ class PersonaStore:
         self.update_task_manifest(task_id, outputs=records, output_count=len(records), output_bytes=sum(item["size"] for item in records))
         return records
 
+    def task_output_file(self, task_id: str, filename: str) -> Path:
+        """任务结果图路径（只读，不建目录）；文件名必须是无路径的裸名。"""
+        if Path(filename).name != filename:
+            raise ValueError("文件名不安全")
+        directory = self.task_dir(task_id) / "outputs"
+        path = ensure_child(directory, directory / filename)
+        if path.is_symlink() or not path.is_file():
+            raise FileNotFoundError(filename)
+        return path
+
+    def list_tasks(self, limit: int = 30) -> list[dict]:
+        """最近的任务清单（按 updated_at 倒序）。
+
+        只读 ``task.json``：不含图片内容，也不含用户/Bot/群/Persona 身份字段
+        （manifest 本身已去身份化）。
+        """
+        try:
+            directories = [path for path in self.task_cache.iterdir() if path.is_dir()]
+        except OSError:
+            return []
+        items: list[dict] = []
+        for directory in directories:
+            try:
+                value = json.loads((directory / "task.json").read_text("utf-8"))
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                continue
+            if not isinstance(value, dict):
+                continue
+            items.append({
+                "task_id": str(value.get("task_id") or directory.name),
+                "kind": str(value.get("kind", "")),
+                "state": str(value.get("state", "")),
+                "stage": str(value.get("stage", "")),
+                "created_at": int(value.get("created_at", 0) or 0),
+                "updated_at": int(value.get("updated_at", 0) or 0),
+                "input_count": int(value.get("input_count", 0) or 0),
+                "output_count": int(value.get("output_count", 0) or 0),
+                "output_bytes": int(value.get("output_bytes", 0) or 0),
+                "output_name": _first_output_name(value),
+                "errors": [str(item) for item in (value.get("errors") or [])][:5],
+                "allocation": dict(value.get("persona_reference_allocation") or {}),
+            })
+        items.sort(key=lambda item: item["updated_at"], reverse=True)
+        return items[: max(1, int(limit))]
+
     def prune_task_cache(self, max_bytes: int, protected: set[str] | None = None) -> None:
         limit = max(16 * 1024 * 1024, int(max_bytes))
         protected = {self._task_id(value) for value in (protected or set())}
@@ -203,11 +248,15 @@ class PersonaStore:
     def _legacy_dir(self, persona_id: str) -> Path:
         return self.references / safe_component(persona_id)
 
-    def persona_dir(self, persona_id: str) -> Path:
-        """Persona 目录：优先可读名（如 ``拉菲``），并自动迁移旧的哈希目录。
+    def persona_dir(self, persona_id: str, *, create: bool = True) -> Path:
+        """Persona 目录：优先可读名（如 ``persona_demo``），并自动迁移旧的哈希目录。
 
         目录里的 ``persona.json`` 记录真实 persona_id；同名但不同 id（可读名冲突）时
         退回 ``名字-哈希``，避免两个人设共用同一个目录。
+
+        ``create=False`` 是纯读路径：不建目录、不写 marker、不迁移旧目录——否则
+        「查一下某个人设」这种只读请求也会在数据目录里留下永久空目录，并让随后
+        「目录是否存在」的判断自我成立。
         """
         name = self._readable_name(persona_id)
         directory = self.references / name
@@ -222,11 +271,14 @@ class PersonaStore:
                 directory = self.references / f"{name}-{safe_component(persona_id)[:8]}"
         legacy = self._legacy_dir(persona_id)
         if not directory.exists() and legacy.exists():
+            if not create:
+                return legacy
             try:
                 legacy.rename(directory)
             except OSError:
                 return legacy
-        self._write_marker(directory, persona_id)
+        if create:
+            self._write_marker(directory, persona_id)
         return directory
 
     def migrate_legacy_dirs(self) -> None:
@@ -286,8 +338,48 @@ class PersonaStore:
         target.write_bytes(data)
         return {"name": target.name, "md5": digest, "size": len(data), "mime_type": mime_type}
 
+    def list_local_names(self) -> list[str]:
+        """本地已有素材的角色名（含手动新增、AstrBot 没有同名 persona 的角色）。"""
+        try:
+            return sorted(
+                path.name for path in self.references.iterdir()
+                if path.is_dir() and not path.is_symlink()
+            )
+        except OSError:
+            return []
+
+    def create_local_persona(self, name: str) -> dict[str, object]:
+        """手动新增本地角色：只建目录（目录名即角色名），不涉及人设 prompt。
+
+        同名目录已存在时按幂等处理，直接返回。人设那边以后出现同名 persona 时，
+        角色名会对上，素材与摘要沿用本地这份，等于自动合并。
+        """
+        text = str(name or "").strip()
+        if not text:
+            raise ValueError("角色名不能为空")
+        if len(text) > 60:
+            raise ValueError("角色名不能超过 60 字")
+        if self._readable_name(text) != text:
+            # 目录名会被改写（非法字符换下划线）而人设/会话里用的是原名，对不上就永远匹配不到。
+            raise ValueError("角色名不能包含 \\ / : * ? \" < > | 或首尾空格、点")
+        existed = any(item == text for item in self.list_local_names())
+        self.persona_dir(text)
+        return {"persona_id": text, "created": not existed}
+
+    def delete_local_persona(self, name: str) -> None:
+        """删除本地角色目录与其摘要缓存（只在 AstrBot 没有人设时由上层调用）。"""
+        text = str(name or "").strip()
+        directory = self.references / self._readable_name(text)
+        if not directory.is_dir() or directory.is_symlink():
+            raise FileNotFoundError(text)
+        shutil.rmtree(directory)
+        values = self._load_summaries()
+        if text in values:
+            values.pop(text, None)
+            self._save_summaries(values)
+
     def list_references(self, persona_id: str) -> list[dict[str, int | str]]:
-        directory = self.persona_dir(persona_id)
+        directory = self.persona_dir(persona_id, create=False)
         if not directory.exists():
             return []
         return [
@@ -297,9 +389,10 @@ class PersonaStore:
         ]
 
     def reference_path(self, persona_id: str, filename: str) -> Path:
+        """参考图路径（只读，不建目录）。"""
         if Path(filename).name != filename:
             raise ValueError("文件名不安全")
-        directory = self.persona_dir(persona_id)
+        directory = self.persona_dir(persona_id, create=False)
         path = ensure_child(directory, directory / filename)
         if path.is_symlink() or not path.is_file():
             raise FileNotFoundError(filename)
@@ -307,3 +400,13 @@ class PersonaStore:
 
     def delete_reference(self, persona_id: str, filename: str) -> None:
         self.reference_path(persona_id, filename).unlink()
+
+
+def _first_output_name(manifest: dict) -> str:
+    """manifest 里第一张结果图的文件名（没有就是空串）。"""
+    outputs = manifest.get("outputs") or []
+    if isinstance(outputs, list) and outputs:
+        first = outputs[0]
+        if isinstance(first, dict):
+            return str(first.get("file", ""))
+    return ""

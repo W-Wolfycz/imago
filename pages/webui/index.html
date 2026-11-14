@@ -17,18 +17,20 @@
       <button class="tab active" data-tab="personas">人设审阅</button>
       <button class="tab" data-tab="providers">节点管理</button>
       <button class="tab" data-tab="quotas">额度管理</button>
+      <button class="tab" data-tab="tasks">任务</button>
     </nav>
 
     <section id="tab-personas" class="panel active">
       <aside class="persona-list">
         <label>搜索 Persona<input id="persona-search" type="search" placeholder="输入 Persona ID"></label>
+        <div class="persona-new"><input id="new-persona-name" type="text" placeholder="新角色名称" aria-label="新角色名称"><button id="add-local-persona" type="button">新增</button></div>
         <select id="persona-select" size="14" aria-label="Persona 列表"></select>
       </aside>
       <div class="persona-detail">
-        <div class="section-head"><div><p class="eyebrow">当前 Persona</p><h2 id="persona-title">请选择</h2></div></div>
-        <article class="card"><h3>完整 Persona Prompt</h3><pre id="persona-prompt">尚未选择 Persona</pre></article>
-        <article class="card"><h3>Persona 摘要 Provider</h3><p>识图 Provider 仅在此页面勾选参考图并手动重建摘要时调用。</p><div class="brain-selectors"><label>副脑 Provider<select id="optimizer-provider"></select></label><label>Persona 识图 Provider<select id="vision-provider"></select></label></div></article>
-        <article class="card summary-card"><div class="card-title"><div><h3>外观摘要</h3><p>LLM 自动摘要会被约束为简短外观描述；手工覆写不限字数，由你自行审阅和编辑。</p></div><span id="summary-mode" class="pill"></span></div><textarea id="persona-summary" rows="5" placeholder="尚无摘要"></textarea><div class="actions"><span id="summary-count">0 字符</span><div class="summary-buttons"><button id="rebuild" disabled>重建外观摘要</button><button id="save-summary" disabled>保存手工覆写</button></div></div></article>
+        <div class="section-head"><div><p class="eyebrow">当前 Persona</p><h2 id="persona-title">请选择</h2></div><div class="actions"><span id="persona-source" class="pill"></span><button id="delete-local-persona" type="button" hidden>删除本地角色</button></div></div>
+        <article class="card" id="persona-prompt-card"><h3>完整 Persona Prompt</h3><pre id="persona-prompt">尚未选择 Persona</pre></article>
+        <article class="card"><h3>Persona 摘要 Provider</h3><p>识图 Provider 把勾选的参考图读成外观证据（必须支持图片输入）；副脑 Provider 把证据与人设文本整理成摘要（留空则跟随当前会话模型）。</p><div class="brain-selectors"><label>副脑 Provider<select id="optimizer-provider"></select></label><label>Persona 识图 Provider<select id="vision-provider"></select></label></div></article>
+        <article class="card summary-card"><div class="card-title"><div><h3>外观摘要</h3><p>人设角色可由 LLM 结合人设与参考图生成摘要；本地角色没有人设，只能手动填写，或勾选参考图后点「重建」用识图生成。</p></div><span id="summary-mode" class="pill"></span></div><textarea id="persona-summary" rows="5" placeholder="尚无摘要"></textarea><p id="summary-error" class="inline-error" hidden></p><div class="actions"><span id="summary-count">0 字符</span><div class="summary-buttons"><button id="rebuild" disabled>重建外观摘要</button><button id="save-summary" disabled>保存手工覆写</button></div></div></article>
         <article class="card">
           <div class="reference-heading"><h3>Persona 参考图</h3><p>支持 PNG、JPEG、WebP 和 GIF，可一次选择多张。</p></div>
           <div class="upload"><input id="reference-files" type="file" accept="image/png,image/jpeg,image/webp,image/gif" multiple><button id="upload" disabled>上传所选图片</button></div>
@@ -36,6 +38,21 @@
         </article>
       </div>
     </section>
+
+    <section id="tab-tasks" class="panel">
+      <div class="task-management">
+        <div class="task-intro">
+          <div><p class="eyebrow">任务</p><h2>最近任务</h2><p>按更新时间倒序；只显示任务清单与状态，不含图片内容和用户身份。</p></div>
+          <button id="refresh-tasks" type="button">刷新</button>
+        </div>
+        <div id="task-list" class="task-list"><p class="empty">正在读取任务……</p></div>
+      </div>
+    </section>
+
+    <div id="task-lightbox" class="lightbox" hidden>
+      <img id="task-lightbox-img" alt="任务结果">
+      <button id="task-lightbox-close" type="button">关闭</button>
+    </div>
 
     <section id="tab-providers" class="panel">
       <div class="provider-management"><div class="provider-intro"><div><p class="eyebrow">节点管理</p><h2>调用顺序</h2><p>点击节点左侧图标设置主节点（⭐）；未设置或无效时第一个有效节点为主节点，其余节点按列表顺序调用。</p></div><button id="add-provider" type="button">新建节点</button></div><div id="provider-list" class="provider-list"><p class="empty">正在读取节点……</p></div></div>

@@ -66,9 +66,6 @@ def parse_custom_params(value: Any) -> tuple[tuple[str, str], ...]:
     return tuple(items)
 
 
-# 配置页直接提供的参数控件（值最终并入 custom_params）
-KNOWN_PARAM_KEYS = ("size", "quality", "nsfw")
-
 # 每个协议实际认哪些控件字段：其余字段即使写在配置里也忽略（例如 Gemini 的 quality）
 TYPED_KEYS_BY_API = {
     "openai_image": ("size", "quality"),
@@ -98,15 +95,17 @@ def provider_custom_params(item: Mapping[str, Any]) -> tuple[tuple[str, str], ..
     """
     params = dict(parse_custom_params(item.get("custom_params", "")))
     api_type = str(item.get("api_type", "")).strip()
-    for key in TYPED_KEYS_BY_API.get(api_type, KNOWN_PARAM_KEYS):
+    for key in TYPED_KEYS_BY_API.get(api_type, ()):
+        # 文本里显式写过的键优先：控件默认值（size 空串、quality 的 auto/medium）
+        # 会把它悄悄覆盖或删掉，用户以为设了却没生效。
+        if key in params:
+            continue
         value = _typed_value(item, api_type, key)
         if value is None:
             continue
         text = "true" if value is True else "" if value is False else str(value or "").strip()
         if text:
             params[key] = text
-        else:
-            params.pop(key, None)
     if "size" not in params:
         legacy = str(item.get("default_size", "") or "").strip()
         if legacy:
@@ -114,9 +113,7 @@ def provider_custom_params(item: Mapping[str, Any]) -> tuple[tuple[str, str], ..
     return tuple(params.items())
 
 
-def split_custom_params(
-    text: Any, keys: tuple[str, ...] = KNOWN_PARAM_KEYS,
-) -> tuple[dict[str, str], str]:
+def split_custom_params(text: Any, keys: tuple[str, ...]) -> tuple[dict[str, str], str]:
     """把页面提交的 ``custom_params`` 文本拆成「控件字段」与「其余文本」。
 
     只有该协议支持的键会被拆出来（``custom_endpoint`` 传空元组，全部留在文本里），
@@ -184,6 +181,7 @@ def load_config(raw: Mapping[str, Any]) -> RuntimeConfig:
     optimizer = raw.get("optimizer_config", {}) or {}
     quota_raw = raw.get("quota_config", {}) or {}
     tasks = raw.get("task_config", {}) or {}
+    persona_raw = raw.get("persona_config", {}) or {}
     storage = raw.get("storage_config", {}) or {}
     style = _style(optimizer.get("optimizer_style", "default(通用)"))
     checkin_min = max(0, int(quota_raw.get("daily_checkin_quota_min", 1) or 0))
@@ -218,6 +216,7 @@ def load_config(raw: Mapping[str, Any]) -> RuntimeConfig:
         max_upload_bytes=max(1, int(storage.get("max_upload_mb", 20) or 20)) * 1024 * 1024,
         temp_cache_bytes=max(16, int(storage.get("temp_cache_mb", 512) or 512)) * 1024 * 1024,
         reference_shrink=bool(storage.get("reference_shrink", True)),
+        max_companions=max(0, min(5, _int_or_default(persona_raw.get("max_companions"), 2))),
         block_private_networks=bool(storage.get("block_private_networks", True)),
         log_with_bot_id=bool(raw.get("log_with_bot_id", False)),
     )
@@ -251,24 +250,3 @@ def style_arg_consumed(cfg: RuntimeConfig, *, use_optimizer: bool) -> bool:
     留着只会让 `/画` 之类的直连路径多一个看不见的状态。
     """
     return bool(use_optimizer or cfg.fallback_style_injection)
-
-
-def persona_provider_settings(umo_config: Any, default_config: Any) -> dict:
-    """人设解析用的 provider_settings，与主链 LLM 请求的实际数据源对齐。
-
-    AstrBot 4.27.x 主链 `_decorate_llm_request`：
-
-        cfg = config.provider_settings or context.get_config(umo=...).get("provider_settings", {})
-
-    `config.provider_settings` 是 pipeline 按 UMO 路由（umop_config_routing）命中的
-    配置文件快照，回退分支 `get_config(umo)` 同样是会话命中配置（acm.get_conf 未命中
-    时才内部回退默认配置）——两个分支都不读全局默认配置。多配置文件场景下默认配置与
-    会话命中配置的 default_personality 不同，插件侧必须用同一数据源，否则 Persona 任务
-    会解析成默认配置的人设（如本插件历史上「全局优先」导致的错位）。
-
-    等价实现：优先 umo_config（会话命中配置），仅当其为 None（调用方未取到）时才
-    回退 default_config；会话命中配置存在但 provider_settings 为空时返回空 dict，
-    与主链行为一致（不吞回全局默认）。
-    """
-    source = umo_config if umo_config is not None else default_config
-    return (source or {}).get("provider_settings", {}) or {}

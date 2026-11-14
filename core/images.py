@@ -60,3 +60,20 @@ def is_animated(source) -> bool:
             return bool(getattr(image, "is_animated", False))
     except Exception:
         return False
+
+
+def thumbnail(data: bytes, mime_type: str, *, max_edge: int = 360, quality: int = 80):
+    """生成任务列表用的缩略图；Pillow 不可用或解码失败时原样返回。"""
+    try:
+        from PIL import Image
+    except ImportError:
+        return data, mime_type
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            image = image.convert("RGB")
+            image.thumbnail((max_edge, max_edge))
+            buffer = io.BytesIO()
+            image.save(buffer, "JPEG", quality=quality, optimize=True)
+        return buffer.getvalue(), "image/jpeg"
+    except Exception:
+        return data, mime_type

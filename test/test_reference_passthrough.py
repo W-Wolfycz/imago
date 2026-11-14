@@ -305,6 +305,9 @@ class XaiImageAdapterTests(unittest.TestCase):
         self.assertIsNone(case["form"])
         self.assertEqual(case["json"]["image"]["url"], "data:image/png;base64,aQ==")
         self.assertNotIn("images", case["json"])
+        # 官方没有 size：size 只折算成 aspect_ratio，不能再作为 size 发给上游
+        self.assertNotIn("size", case["json"])
+        self.assertEqual(case["json"]["aspect_ratio"], "3:4")
         multi = self._capture(with_references=True, references=2)
         self.assertEqual(len(multi["json"]["images"]), 2)
         self.assertNotIn("image", multi["json"])
