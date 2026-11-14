@@ -84,8 +84,7 @@ WebUI 选择的主节点默认模型 → 主节点备选模型 → 其他节点�
 | `/imago status` | 查看自己的任务（含参考图数量与分配、剩余预算、失败原因） |
 | `/imago quota help/show/sign` | 查看、查询或签到 |
 | `/imago quota add/del/set <用户 ID> <整数>` | 管理员调额 |
-| `/imago ref-upload` | 上传 Persona 参考图 |
-| `/imago summary-show/rebuild/set` | 查看、重建或设置外观摘要 |
+| `/imago ref-upload [角色名]` | 上传参考图（管理员）；不带角色名传给当前会话人设，带角色名传给该角色（名字需完全匹配，失配给出最接近的候选） |
 | `/imago provider-primary <节点 ID>` | 指定主节点（也可在 WebUI 设置） |
 | `/imago provider-disable <节点 ID>` | 临时停用节点（保留配置，用于测试降级/换节点） |
 | `/imago provider-enable <节点 ID>` | 重新启用节点 |

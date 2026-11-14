@@ -80,29 +80,6 @@ FOREGROUND_REFERENCE_TIMEOUT = 30.0
 
 @register("imago", "Wolfycz", "异步图片生成与 Persona 素材管理", "1.4.0")
 class Imago(Star):
-    _STAGE_LABELS = {
-        TaskStage.QUEUED: "排队中",
-        TaskStage.PREPARING_REFERENCES: "正在准备参考图",
-        TaskStage.BUILDING_PERSONA: "正在准备 Persona 外观",
-        TaskStage.OPTIMIZING_PROMPT: "正在整理本轮画面",
-        TaskStage.REQUESTING_PROVIDER: "正在请求图片生成节点",
-        TaskStage.PROCESSING_RESULT: "正在处理图片结果",
-        TaskStage.DECORATING: "正在执行发送前处理",
-        TaskStage.SENDING: "正在发起图片发送",
-        TaskStage.FINISHED: "任务流程已结束",
-    }
-    _STATE_LABELS = {
-        TaskState.CREATED: "已创建",
-        TaskState.QUEUED: "排队中",
-        TaskState.RUNNING: "运行中",
-        TaskState.SUCCEEDED: "已生成并完成发送调用",
-        TaskState.PARTIAL_SUCCESS: "部分成功并完成发送调用",
-        TaskState.DELIVERY_FAILED: "图片已生成，但发送失败",
-        TaskState.NO_OUTPUT: "没有可用图片",
-        TaskState.FAILED: "已失败",
-        TaskState.TIMED_OUT: "已超时",
-        TaskState.CANCELLED: "已取消",
-    }
     def __init__(self, context: Context, config=None):
         super().__init__(context)
         self.context = context
@@ -116,6 +93,31 @@ class Imago(Star):
             lambda: load_config(self.raw_config).max_upload_bytes,
         )
         self.quota_store = QuotaStore(data_dir, self._quota_today)
+
+    _STAGE_LABELS = {
+        TaskStage.QUEUED: "排队中",
+        TaskStage.PREPARING_REFERENCES: "正在准备参考图",
+        TaskStage.BUILDING_PERSONA: "正在准备 Persona 外观",
+        TaskStage.OPTIMIZING_PROMPT: "正在整理本轮画面",
+        TaskStage.REQUESTING_PROVIDER: "正在请求图片生成节点",
+        TaskStage.PROCESSING_RESULT: "正在处理图片结果",
+        TaskStage.DECORATING: "正在执行发送前处理",
+        TaskStage.SENDING: "正在发起图片发送",
+        TaskStage.FINISHED: "任务流程已结束",
+    }
+
+    _STATE_LABELS = {
+        TaskState.CREATED: "已创建",
+        TaskState.QUEUED: "排队中",
+        TaskState.RUNNING: "运行中",
+        TaskState.SUCCEEDED: "已生成并完成发送调用",
+        TaskState.PARTIAL_SUCCESS: "部分成功并完成发送调用",
+        TaskState.DELIVERY_FAILED: "图片已生成，但发送失败",
+        TaskState.NO_OUTPUT: "没有可用图片",
+        TaskState.FAILED: "已失败",
+        TaskState.TIMED_OUT: "已超时",
+        TaskState.CANCELLED: "已取消",
+    }
 
     def _migrate_provider_template_keys(self) -> None:
         """给 providers 条目补齐 AstrBot 管理页要求的模板键并落盘。
@@ -274,25 +276,6 @@ class Imago(Star):
             )
             return []
 
-    def _is_duplicate_submission(self, event, fingerprint: str, trigger_message_id: str) -> bool:
-        """本条用户消息是否已创建过绘图任务（或缺少消息 ID 时的同内容在途/刚结束任务）。"""
-        records = [
-            {
-                "dedupe_key": task.runtime.get("dedupe_key", ""),
-                "trigger_message_id": task.runtime.get("trigger_message_id", ""),
-                "created_at": task.created_at,
-                "pending": not task.state.is_terminal,
-            }
-            for task in self._tasks_for_event(event)
-        ]
-        return is_duplicate_request(
-            records,
-            dedupe_key=fingerprint,
-            trigger_message_id=trigger_message_id,
-            now=time.monotonic(),
-            window=DEDUPE_WINDOW_SECONDS,
-        )
-
     def _task_status_lines(self, tasks):
         now = time.monotonic()
         lines = []
@@ -331,6 +314,26 @@ class Imago(Star):
                 line += f"\n  记录：{','.join(task.errors[-3:])}"
             lines.append(line)
         return lines
+
+
+    def _is_duplicate_submission(self, event, fingerprint: str, trigger_message_id: str) -> bool:
+        """本条用户消息是否已创建过绘图任务（或缺少消息 ID 时的同内容在途/刚结束任务）。"""
+        records = [
+            {
+                "dedupe_key": task.runtime.get("dedupe_key", ""),
+                "trigger_message_id": task.runtime.get("trigger_message_id", ""),
+                "created_at": task.created_at,
+                "pending": not task.state.is_terminal,
+            }
+            for task in self._tasks_for_event(event)
+        ]
+        return is_duplicate_request(
+            records,
+            dedupe_key=fingerprint,
+            trigger_message_id=trigger_message_id,
+            now=time.monotonic(),
+            window=DEDUPE_WINDOW_SECONDS,
+        )
 
     @filter.on_llm_request(priority=50)
     async def filter_image_generation_tools(self, event: AstrMessageEvent, req: ProviderRequest):
@@ -593,6 +596,22 @@ class Imago(Star):
         if not persona_id or not prompt:
             raise ValueError("Persona 不存在或 prompt 为空")
         return persona_id, prompt
+
+    async def _resolve_character(self, name: str) -> str:
+        """把用户输入的角色名解析成已存在的角色（完全匹配，失败时给最接近的候选）。
+
+        与合照提交同一套规则：不做模糊替换，否则打错一个字就会把图传到别的角色名下。
+        """
+        query = str(name or "").strip()
+        if not query:
+            raise ValueError("请提供角色名")
+        known = await self.list_character_ids()
+        if query in known:
+            return query
+        usable = "、".join(sorted(known)[:10]) or "无"
+        guesses = suggest_personas(query, known)
+        hint = f"；最接近：{'、'.join(guesses)}" if guesses else ""
+        raise ConfigurationError(f"本地没有找到角色：{query}（可用：{usable}{hint}）")
 
     async def _resolve_companions(self, names, *, exclude: str = "") -> list[tuple[str, str]]:
         """把角色名解析成 ``(persona_id, prompt)``；查不到直接报错。
@@ -1715,9 +1734,18 @@ class Imago(Star):
             except (TypeError, ValueError) as exc:
                 raise ValueError("额度必须是整数") from exc
             user_id = self._quota_target_user_id(event, target)
+            # 先取一次余额：adjust 内部会按策略刷新，这里同样刷新过，delta 才是真实变动
+            before = self.quota_store.inspect(user_id, self._quota_policy()).quota
             snapshot = self.quota_store.adjust(user_id, operation, amount, self._quota_policy())
-            action = {"add": "增加", "del": "扣除", "set": "设置"}[operation]
-            return f"已为用户 {user_id} {action}额度 {max(0, int(amount))}；当前余额 {snapshot.quota}。"
+            delta = int(snapshot.quota) - int(before)
+            if operation == "set":
+                return f"已为用户 {user_id} 把额度设为 {snapshot.quota}（原 {before}）。"
+            if operation == "add":
+                return f"已为用户 {user_id} 增加额度 {delta}；当前余额 {snapshot.quota}。"
+            text = f"已为用户 {user_id} 扣除额度 {-delta}；当前余额 {snapshot.quota}。"
+            if snapshot.quota == 0 and -delta < amount:
+                text += "原余额不足，额度已归零。"
+            return text
         except Exception as exc:
             return self._safe_creation_error(exc)
 
@@ -1756,10 +1784,7 @@ class Imago(Star):
             "- /imago quota sign  每日签到领取额度",
             "",
             "[Persona 素材]",
-            "- /imago ref-upload  为当前人设上传参考图（同条消息附图）",
-            "- /imago summary-show  查看当前人设外观摘要",
-            "- /imago summary-rebuild  重新生成外观摘要",
-            "- /imago summary-set <外观摘要>  手工设置外观摘要",
+            "- /imago ref-upload [角色名]  上传参考图（同条消息附图；带角色名则传给该角色）",
             "",
             "[图片节点]",
             "- /imago provider-primary <节点 ID>  设置主节点（也可在 WebUI 设置）",
@@ -1802,6 +1827,7 @@ class Imago(Star):
         text = "当前映相任务：\n" + "\n".join(self._task_status_lines(tasks)) + "\n不提供准确完成时间。"
         yield event.plain_result(text)
 
+
     @imago_group.command("draw")
     async def draw_command(self, event: AstrMessageEvent, prompt: GreedyStr):
         try:
@@ -1827,55 +1853,30 @@ class Imago(Star):
     async def photo_shortcut(self, event: AstrMessageEvent, action: GreedyStr):
         async for result in self.photo_command(event, action): yield result
 
-    @imago_group.command("summary-show")
-    async def summary_show(self, event: AstrMessageEvent):
-        try:
-            persona_id, prompt = await self._resolve_persona(event); item = self.store.get_summary(persona_id, prompt)
-            yield event.plain_result((item or {}).get("summary", "尚无可用外观摘要。"))
-        except Exception as exc:
-            yield event.plain_result(self._safe_creation_error(exc))
+    async def _upload_references(self, event: AstrMessageEvent, persona_id: str) -> int:
+        """把本条消息（或引用消息）里的图片存进指定角色，返回张数。"""
+        components = list(event.get_messages()) if hasattr(event, "get_messages") else []
+        images = await self._event_references(components, event)
+        if not images:
+            raise ValueError("请在同一条消息中附带图片")
+        for image in images:
+            self.store.add_reference(persona_id, image.data, image.mime_type)
+        return len(images)
 
-    @imago_group.command("summary-rebuild")
-    async def summary_rebuild(self, event: AstrMessageEvent):
-        try:
-            persona_id, _ = await self._resolve_persona(event)
-            summary = await self.rebuild_summary(
-                persona_id, umo=event.unified_msg_origin,
-            )
-            yield event.plain_result(summary)
-        except Exception as exc:
-            yield event.plain_result(self._safe_creation_error(exc))
-
-    @imago_group.command("summary-set")
-    async def summary_set(self, event: AstrMessageEvent, summary: GreedyStr):
-        try:
-            persona_id, prompt = await self._resolve_persona(event)
-            self.store.set_summary(persona_id, prompt, summary, manual=True)
-            yield event.plain_result("已设置手工外观摘要。")
-        except Exception as exc:
-            yield event.plain_result(self._safe_creation_error(exc))
-
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @imago_group.command("ref-upload")
-    async def ref_upload(self, event: AstrMessageEvent):
+    async def ref_upload(self, event: AstrMessageEvent, target: GreedyStr = ""):
+        """`/imago ref-upload` 给当前会话人设上传；带角色名则给该角色上传。"""
         try:
-            persona_id, _ = await self._resolve_persona(event)
-            components = list(event.get_messages()) if hasattr(event, "get_messages") else []
-            images = await self._event_references(components, event)
-            if not images: raise ValueError("请在同一条消息中附带图片")
-            for image in images: self.store.add_reference(persona_id, image.data, image.mime_type)
-            yield event.plain_result(f"已上传 {len(images)} 张 Persona 参考图。")
+            name = str(target or "").strip()
+            if name:
+                persona_id = await self._resolve_character(name)
+            else:
+                persona_id, _ = await self._resolve_persona(event)
+            count = await self._upload_references(event, persona_id)
+            yield event.plain_result(f"已为「{persona_id}」上传 {count} 张参考图。")
         except Exception as exc:
             yield event.plain_result(self._safe_creation_error(exc))
-
-    @imago_group.command("provider-primary")
-    async def provider_primary(self, event: AstrMessageEvent, provider_id: str):
-        configured = [item.id for item in load_config(self.raw_config).providers]
-        provider_id = provider_id.strip()
-        if provider_id not in configured:
-            yield event.plain_result(f"节点不存在。已配置节点：{', '.join(configured) or '无'}")
-            return
-        self.store.set_primary_provider_id(provider_id)
-        yield event.plain_result(f"已将主图片生成节点设为 {provider_id}；其他节点将按配置顺序 fallback。")
 
     def _set_provider_enabled(self, provider_id: str, enabled: bool) -> str:
         """临时启用/停用节点：保留配置，只影响调度（聊天里即可做降级测试）。"""
@@ -1902,10 +1903,24 @@ class Imago(Star):
         configured = [str(item.get("id", "")) for item in items if isinstance(item, dict)]
         return f"节点不存在。已配置节点：{', '.join(configured) or '无'}"
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
+    @imago_group.command("provider-primary")
+    async def provider_primary(self, event: AstrMessageEvent, provider_id: str):
+        configured = [item.id for item in load_config(self.raw_config).providers]
+        provider_id = provider_id.strip()
+        if provider_id not in configured:
+            yield event.plain_result(f"节点不存在。已配置节点：{', '.join(configured) or '无'}")
+            return
+        self.store.set_primary_provider_id(provider_id)
+        yield event.plain_result(f"已将主图片生成节点设为 {provider_id}；其他节点将按配置顺序 fallback。")
+
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @imago_group.command("provider-enable")
     async def provider_enable(self, event: AstrMessageEvent, provider_id: str):
         yield event.plain_result(self._set_provider_enabled(provider_id.strip(), True))
 
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @imago_group.command("provider-disable")
     async def provider_disable(self, event: AstrMessageEvent, provider_id: str):
         yield event.plain_result(self._set_provider_enabled(provider_id.strip(), False))
