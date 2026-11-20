@@ -183,10 +183,20 @@ class PageAPI:
             return _err("删除失败", 500)
 
     async def preview(self):
+        """Persona 参考图：``size=thumb``（默认）给列表缩略图，``size=full`` 给灯箱原图。
+
+        列表用缩略图是因为一页十几张原图 base64 能有几十 MB，手机上永远转圈。
+        """
         try:
-            path = self.plugin.store.reference_path(str(request.args.get("persona_id", "")), str(request.args.get("filename", "")))
+            persona_id = str(request.args.get("persona_id", ""))
+            filename = str(request.args.get("filename", ""))
+            mode = str(request.args.get("size", "thumb")).strip().lower()
+            path = self.plugin.store.reference_path(persona_id, filename)
+            data = path.read_bytes()
             mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif"}.get(path.suffix.lower(), "image/png")
-            encoded = base64.b64encode(path.read_bytes()).decode()
+            if mode != "full":
+                data, mime = thumbnail(data, mime)
+            encoded = base64.b64encode(data).decode()
             return _ok(mime_type=mime, base64_data=encoded, data_url=f"data:{mime};base64,{encoded}")
         except (ValueError, FileNotFoundError):
             return _err("图片不存在", 404)

@@ -222,6 +222,16 @@ APPEARANCE_TERMS = (
     "靴", "鞋", "帽", "饰", "耳", "颈", "肩", "腰", "腿", "纹", "妆", "披风", "缎带",
 )
 
+def clip_notice(text: str, limit: int) -> str:
+    """截断提示文案；真被截断时补省略号，让"还有内容"这件事可见。
+
+    只用于展示层（错误提示把模型原话带一段给人看）。持久化数据一律不这样切——
+    存进库的内容截断就是数据损坏，必须按语义边界收束并显式标记。
+    """
+    value = str(text or "").strip()
+    return value if len(value) <= limit else value[:limit] + "…"
+
+
 def provider_supports_image(provider_config) -> bool | None:
     """Provider 是否声明支持图片输入；拿不到模态信息时返回 ``None``（不拦）。"""
     if not isinstance(provider_config, dict):

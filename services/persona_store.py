@@ -3,6 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+
+# 外观摘要长度上限：超过就报错，不硬截断（正常生成约 200 字）
+MAX_SUMMARY_CHARS = 1200
 import re
 import shutil
 import time
@@ -157,11 +160,30 @@ class PersonaStore:
         return hashlib.sha256(prompt.encode("utf-8")).hexdigest()
 
     def _load_summaries(self) -> dict[str, dict]:
+        """读摘要文件。
+
+        只有「文件不存在」才算空；**解析失败必须抛**——返回空字典会让下一次
+        set_summary 把整份文件覆盖成单条，其余角色的摘要永久丢失。
+        """
         try:
-            value = json.loads(self.summaries.read_text("utf-8"))
-            return value if isinstance(value, dict) else {}
-        except (FileNotFoundError, json.JSONDecodeError, OSError):
+            raw = self.summaries.read_text("utf-8")
+        except FileNotFoundError:
             return {}
+        except OSError as exc:
+            raise ValueError(f"无法读取外观摘要文件：{type(exc).__name__}") from exc
+        try:
+            value = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            backup = self.summaries.with_suffix(f".corrupt-{int(time.time())}")
+            try:
+                shutil.copy2(self.summaries, backup)
+            except OSError:
+                backup = None
+            where = backup.name if backup else "未能备份"
+            raise ValueError(f"外观摘要文件损坏（原文件{where}）：第 {exc.pos} 字符附近") from exc
+        if not isinstance(value, dict):
+            raise ValueError("外观摘要文件格式异常：顶层不是对象")
+        return value
 
     def _save_summaries(self, value: dict[str, dict]) -> None:
         self.root.mkdir(parents=True, exist_ok=True)
@@ -205,10 +227,13 @@ class PersonaStore:
 
     def set_summary(self, persona_id: str, prompt: str, summary: str, *, manual: bool, reference_names=None) -> dict:
         summary = " ".join(summary.split())
-        if not manual:
-            summary = summary[:220]
         if not summary:
             raise ValueError("外观摘要不能为空")
+        # 超长就报错，不悄悄截断：截断会切在词中间，用户还以为存的是完整摘要。
+        if len(summary) > MAX_SUMMARY_CHARS:
+            raise ValueError(
+                f"外观摘要过长（{len(summary)} 字），请精简到 {MAX_SUMMARY_CHARS} 字以内"
+            )
         reference_names = [str(value) for value in (reference_names or [])]
         values = self._load_summaries()
         values[persona_id] = item = {

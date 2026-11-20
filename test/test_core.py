@@ -69,6 +69,27 @@ class TaskCacheAndQuotaTests(unittest.TestCase):
             store.set_many([{"user_id": "10001", "quota": 9}], policy)
             self.assertFalse(store.checkin("10001", policy).success)
 
+class SummaryStoreIntegrityTests(unittest.TestCase):
+    def test_corrupt_summaries_file_raises_instead_of_wiping(self):
+        # 损坏时返回空字典 → 下一次保存把整份文件覆盖成单条，其余角色摘要永久丢失
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PersonaStore(Path(tmp), 1024)
+            store.set_summary("演示角色甲", "", "白发红瞳", manual=True)
+            target = Path(tmp) / "summaries.json"
+            target.write_text("{坏掉的 json", "utf-8")
+            with self.assertRaises(ValueError):
+                store.set_summary("演示角色乙", "", "黑发", manual=True)
+            self.assertTrue(target.read_text("utf-8").startswith("{坏掉的 json"))
+
+class SummaryLengthTests(unittest.TestCase):
+    def test_overlong_summary_raises_instead_of_truncating(self):
+        # 硬截断会切在词中间且不告知用户（自动摘要此前 220 字截断），属于静默失效
+        with tempfile.TemporaryDirectory() as tmp:
+            store = PersonaStore(Path(tmp), 1024)
+            with self.assertRaises(ValueError):
+                store.set_summary("演示角色甲", "", "字" * 1300, manual=False)
+            self.assertIsNone(store.get_summary("演示角色甲", ""))
+
 class PageEndpointContractTests(unittest.TestCase):
     def test_character_endpoints_accept_local_personas(self):
         # 端点用「prompt 非空」判断角色存在 → 本地角色（无人设）传图/存摘要一律 404；

@@ -43,6 +43,7 @@ from .core.persona_lookup import companion_capacity, match_personas, suggest_per
 from .core.images import REFERENCE_MIME, is_animated, shrink
 from .core.references import ReferencePlanner, quoted_reply_missing_images
 from .core.prompting import (
+    clip_notice,
     REFERENCE_CAPTION_SYSTEM,
     STYLE_AUTO,
     SUMMARY_SYSTEM,
@@ -78,7 +79,7 @@ PENDING_PHOTO = "📸 正在为当前人设「{persona}」拍摄，请稍后…�
 FOREGROUND_REFERENCE_TIMEOUT = 30.0
 
 
-@register("imago", "Wolfycz", "异步图片生成与 Persona 素材管理", "1.4.0")
+@register("imago", "Wolfycz", "异步图片生成与 Persona 素材管理", "1.4.1")
 class Imago(Star):
     def __init__(self, context: Context, config=None):
         super().__init__(context)
@@ -489,7 +490,7 @@ class Imago(Star):
                 if not usable_summary(evidence):
                     if not str(prompt or "").strip():
                         raise ValueError(
-                            f"识图没有返回外观描述，模型返回「{str(evidence or '')[:60] or '（空）'}」"
+                            f"识图没有返回外观描述，模型返回「{clip_notice(evidence, 60) or '（空）'}」"
                         )
                     self._debug("[Imago] 识图结果不可用，回退纯文本")
                     evidence = ""
@@ -503,7 +504,7 @@ class Imago(Star):
             )
         except Exception as exc:
             raise ValueError(
-                f"摘要生成失败（{type(exc).__name__}）：{str(exc)[:80]}。"
+                f"摘要生成失败（{type(exc).__name__}）：{clip_notice(exc, 80)}。"
                 "请检查「副脑 Provider」是否可用"
             ) from exc
         return self._checked_summary(summary)
@@ -523,7 +524,7 @@ class Imago(Star):
         value = str(text or "").strip()
         if not usable_summary(value):
             # 把模型原话带上：它能区分"没看到图"（转换失败）和"看到了但描述不出"（图不合适）
-            snippet = value[:60] or "（空回复）"
+            snippet = clip_notice(value, 60) or "（空回复）"
             raise ValueError(
                 f"摘要生成失败，模型返回「{snippet}」。"
                 "请确认参考图能被识图 Provider 读到，或补充人设提示词后重试"
